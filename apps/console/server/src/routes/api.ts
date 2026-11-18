@@ -3,22 +3,19 @@
  * header (checked globally in app.ts). Operator actions become Temporal Updates carrying the user's GitHub login,
  * so the sentry's history records who did what.
  */
+import { chaosUpdateSchema, regionIdSchema } from '@failover-sentry/contracts/schemas';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { ChaosService } from '../services/chaos-service.js';
-import { chaosUpdateSchema } from '../services/chaos-service.js';
 import type { SentryGateway } from '../services/sentry-gateway.js';
 import type { StateBroadcaster, StreamEvent } from '../services/state-broadcaster.js';
 
-const regionParams = z.object({ regionId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,30}$/) });
+const regionParams = z.object({ regionId: regionIdSchema });
 const alertParams = z.object({ alertId: z.string().min(1).max(64) });
 
 const failoverBody = z
   .object({
-    targetRegionId: z
-      .string()
-      .regex(/^[a-z0-9][a-z0-9-]{0,30}$/)
-      .optional(),
+    targetRegionId: regionIdSchema.optional(),
     mode: z.enum(['planned', 'forced']),
     reason: z.string().trim().min(3).max(500),
   })

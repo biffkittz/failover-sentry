@@ -33,6 +33,9 @@ export interface AppDependencies {
 
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
+/** How long a readiness answer is reused: /readyz is public, and each fresh answer costs a Temporal call. */
+const READINESS_CACHE_MS = 5_000;
+
 const clientErrorSchema = z
   .object({
     message: z.string().max(2_000),
@@ -104,12 +107,13 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
 
   // CSRF: state-changing browser requests must carry the custom header (a cross-site form can't set it, and a
   // cross-origin fetch with it needs a CORS preflight this server never grants) and come from our own origin.
+  // Decided by the matched route, not the raw URL, which can spell the same path differently (percent-escapes).
   app.addHook('onRequest', async (request, reply) => {
     if (!UNSAFE_METHODS.has(request.method)) {
       return undefined;
     }
-    const path = request.url.split('?')[0] ?? '';
-    if (path.startsWith('/api/webhooks/') || (!path.startsWith('/api/') && !path.startsWith('/auth/'))) {
+    const route = request.routeOptions.url ?? '';
+    if (route.startsWith('/api/webhooks/') || (!route.startsWith('/api/') && !route.startsWith('/auth/'))) {
       return undefined;
     }
     const origin = request.headers.origin;
@@ -125,13 +129,20 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
   await app.register(authPlugin, { config, github: deps.github });
 
   app.get('/healthz', { config: { rateLimit: false } }, async () => ({ status: 'ok' }));
+  let readiness: { at: number; ready: Promise<boolean> } | null = null;
   app.get('/readyz', { config: { rateLimit: false } }, async (_request, reply) => {
-    try {
-      await deps.gateway.ping();
-      return { status: 'ok' };
-    } catch {
-      return reply.code(503).send({ status: 'unavailable', reason: 'Temporal is unreachable' });
+    if (!readiness || Date.now() - readiness.at > READINESS_CACHE_MS) {
+      readiness = {
+        at: Date.now(),
+        ready: deps.gateway.ping().then(
+          () => true,
+          () => false,
+        ),
+      };
     }
+    return (await readiness.ready)
+      ? { status: 'ok' }
+      : reply.code(503).send({ status: 'unavailable', reason: 'Temporal is unreachable' });
   });
 
   await app.register(async (scope) =>
@@ -146,10 +157,11 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
     }),
   );
 
-  // Errors the Vue app reports (global error handler): logged here, where Log Analytics collects them.
+  // Errors the Vue app reports (global error handler): logged here, where Log Analytics collects them. Signed-in
+  // users only, so strangers can't write to the logs.
   app.post(
     '/api/client-errors',
-    { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+    { preHandler: app.requireUser, config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
     async (request, reply) => {
       const parsed = clientErrorSchema.safeParse(request.body);
       if (parsed.success) {

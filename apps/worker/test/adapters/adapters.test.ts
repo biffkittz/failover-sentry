@@ -68,9 +68,11 @@ describe('RegionAdminClient', () => {
     expect(probe.error).toBeTruthy();
   });
 
-  it('signs admin orders over method, path and body', async () => {
+  it('signs admin orders over method, path and body, addressed to their region', async () => {
     let verified: boolean | undefined;
+    let order: Record<string, unknown> | undefined;
     const baseUrl = await serve(async (request, response) => {
+      order = JSON.parse(request.body) as Record<string, unknown>;
       const result = await verifySignatureHeader({
         secret,
         method: request.method ?? '',
@@ -87,7 +89,17 @@ describe('RegionAdminClient', () => {
       mode: 'planned',
     });
     expect(verified).toBe(true);
+    expect(order).toEqual({ regionId: 'east', failoverId: 'fo-1', epoch: 4, mode: 'planned' });
     expect(result).toEqual({ outcome: 'ok', db, promotionId: 'east-p1' });
+  });
+
+  it('never adopts an out-of-range epoch from a refusal', async () => {
+    const baseUrl = await serve((_request, response) =>
+      json(response, 409, { error: 'stale_epoch', currentEpoch: Number.MAX_SAFE_INTEGER, message: 'forged' }),
+    );
+    await expect(
+      regionClient(baseUrl).demote('east', { failoverId: null, epoch: 2, reason: 'x' }),
+    ).rejects.toBeInstanceOf(NonRetryableHttpError);
   });
 
   it('maps fencing refusals to data and other failures to retryable or not', async () => {

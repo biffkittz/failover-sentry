@@ -15,6 +15,7 @@ import {
 import {
   abortFailoverUpdate,
   acknowledgeAlertUpdate,
+  getMonitorStateQuery,
   getSentryStateQuery,
   recoverRegionUpdate,
   replicationCompleteSignal,
@@ -22,7 +23,7 @@ import {
   setAutoFailoverUpdate,
   triggerFailoverUpdate,
 } from '@failover-sentry/contracts/temporal';
-import type { WorkflowHandle } from '@temporalio/client';
+import { WorkflowUpdateStage, type WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, Runtime, DefaultLogger, Worker } from '@temporalio/worker';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -74,18 +75,19 @@ async function withSentry(
   world: FakeWorld,
   overrides: Partial<SentryConfig>,
   body: (harness: SentryHarness) => Promise<void>,
+  environment: TestWorkflowEnvironment = env,
 ): Promise<void> {
   const taskQueue = `test-${randomUUID()}`;
   const config = sentryConfig({ serviceName: `svc-${randomUUID().slice(0, 8)}`, ...overrides });
   const worker = await Worker.create({
-    connection: env.nativeConnection,
-    namespace: env.namespace ?? 'default',
+    connection: environment.nativeConnection,
+    namespace: environment.namespace ?? 'default',
     taskQueue,
     workflowBundle: { code: workflowCode },
     activities: world.activities(),
   });
   await worker.runUntil(async () => {
-    const handle = await env.client.workflow.start('failoverSentryWorkflow', {
+    const handle = await environment.client.workflow.start('failoverSentryWorkflow', {
       taskQueue,
       workflowId: sentryWorkflowId(config.serviceName),
       args: [{ config, configVersion: 'test' }],
@@ -212,10 +214,55 @@ describe('failoverSentryWorkflow', () => {
       });
       expect(world.region('east').computeStopped).toBe(false);
       expect(world.region('east').db.role).toBe('replica');
+      // Once both restarted monitors have reported, the old primary's pre-failover "primary" snapshot must not
+      // have been taken for a split brain.
+      const endedAt = Date.parse(lastFailover(done)?.endedAt ?? '');
+      await waitFor('both regions observed after the failover', (state) =>
+        state.regions.every((region) => Date.parse(region.health?.observedAt ?? '') > endedAt),
+      );
+      expect(world.alerts.map((alert) => alert.kind)).not.toContain('SPLIT_BRAIN_FENCED');
       await expectRejected(
         handle.executeUpdate(recoverRegionUpdate, { args: [{ regionId: 'east', requestedBy: 'tester' }] }),
         /nothing to recover/,
       );
+    });
+  });
+
+  it('refuses a second failover while the first is still taking over from normal operations', async () => {
+    const world = new FakeWorld(['east', 'west']);
+    await withSentry(world, {}, async ({ handle, waitFor }) => {
+      await waitFor('east established', established);
+      await waitFor(
+        'west observed healthy',
+        (state) => state.regions.find((region) => region.config.id === 'west')?.health?.status === 'HEALTHY',
+      );
+      const request = (reason: string) => ({ mode: 'planned' as const, reason, requestedBy: 'tester' });
+      // Accepted means the request is pending; the sentry is now stopping its monitors before failing over.
+      await handle.startUpdate(triggerFailoverUpdate, {
+        args: [request('first request')],
+        waitForStage: WorkflowUpdateStage.ACCEPTED,
+      });
+      // A rejected Update surfaces from its result, not from startUpdate.
+      await expectRejected(
+        handle
+          .startUpdate(triggerFailoverUpdate, {
+            args: [request('second request')],
+            waitForStage: WorkflowUpdateStage.ACCEPTED,
+          })
+          .then((update) => update.result()),
+        /already in progress/,
+      );
+      const done = await waitFor('the failover finished', (state) =>
+        Boolean(state.recentFailovers[0]?.outcome),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      const after = await handle.query(getSentryStateQuery);
+      expect(after.recentFailovers).toHaveLength(1);
+      expect(done.recentFailovers[0]).toMatchObject({
+        fromRegionId: 'east',
+        toRegionId: 'west',
+        outcome: 'SUCCEEDED',
+      });
     });
   });
 
@@ -473,4 +520,139 @@ describe('failoverSentryWorkflow', () => {
       expect(state.recentFailovers).toHaveLength(0);
     });
   });
+});
+
+/** Polls until the check passes (or fails the test after the timeout). */
+async function waitUntil(
+  description: string,
+  check: () => Promise<boolean>,
+  timeoutMs = 60_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Timed out waiting for: ${description}`);
+}
+
+/** The promise's value, or null when it takes longer than the timeout (for asserting that something doesn't hang). */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  return Promise.race([promise, new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs))]);
+}
+
+describe('failoverSentryWorkflow continuing as new', () => {
+  const historyLimit = 150;
+  let shortHistoryEnv: TestWorkflowEnvironment;
+
+  beforeAll(async () => {
+    // A server that suggests continue-as-new after a short history, so a test reaches it in seconds.
+    shortHistoryEnv = await TestWorkflowEnvironment.createLocal({
+      server: {
+        executable: { type: 'existing-path', path: temporalCli() },
+        startupTimeout: '30s',
+        extraArgs: ['--dynamic-config-value', `limit.historyCount.suggestContinueAsNew=${historyLimit}`],
+      },
+    });
+  });
+
+  afterAll(async () => {
+    await shortHistoryEnv?.teardown();
+  });
+
+  it('fails over once its monitors have continued as new', async () => {
+    const world = new FakeWorld(['east', 'west']);
+    await withSentry(
+      world,
+      {},
+      async ({ handle, waitFor, lastFailover }) => {
+        await waitFor('east established', established);
+        // A child's cancellation targets the run its parent started; this checks the sentry still stops a monitor
+        // whose chain has moved on (or it would wait for that monitor forever, and never fail over).
+        const monitor = shortHistoryEnv.client.workflow.getHandle(`${handle.workflowId}/monitor/east`);
+        await waitUntil('the east monitor continued as new', async () => {
+          const view = await monitor.query(getMonitorStateQuery).catch(() => null);
+          return (view?.continuedAsNewCount ?? 0) >= 1;
+        });
+        await waitFor(
+          'west observed healthy',
+          (state) =>
+            state.regions.find((region) => region.config.id === 'west')?.health?.status === 'HEALTHY',
+        );
+        const accepted = await withTimeout(
+          handle.executeUpdate(triggerFailoverUpdate, {
+            args: [{ mode: 'planned', reason: 'after monitors continued as new', requestedBy: 'tester' }],
+          }),
+          20_000,
+        );
+        expect(accepted, 'the failover must start').toMatchObject({
+          fromRegionId: 'east',
+          toRegionId: 'west',
+        });
+        const done = await waitFor(
+          'failover finished',
+          (state) => lastFailover(state)?.id === accepted?.failoverId,
+        );
+        expect(lastFailover(done)?.outcome).toBe('SUCCEEDED');
+      },
+      shortHistoryEnv,
+    );
+  }, 120_000);
+
+  it('serves a failover requested while it waits to continue as new, instead of deadlocking', async () => {
+    const world = new FakeWorld(['east', 'west']);
+    await withSentry(
+      world,
+      {},
+      async ({ handle, waitFor }) => {
+        await waitFor('east established', established);
+        // An alert whose delivery hangs keeps continue-as-new waiting for its background tasks.
+        let releaseAlerts: () => void = () => undefined;
+        world.alertGate = new Promise<void>((resolve) => {
+          releaseAlerts = resolve;
+        });
+        try {
+          world.region('west').healthy = false;
+          await waitFor(
+            'west unhealthy',
+            (state) =>
+              state.regions.find((region) => region.config.id === 'west')?.health?.status === 'UNHEALTHY',
+          );
+          world.region('east').healthy = false;
+          const blocked = await waitFor('a no-target alert in flight', (state) =>
+            state.alerts.some((alert) => alert.kind === 'NO_FAILOVER_TARGET'),
+          );
+          const attempts = (state: SentryStateView) =>
+            state.timeline.filter((event) => event.kind === 'CONTINUING_AS_NEW').length;
+          await waitFor(
+            'waiting to continue as new (the alert delivery holds it)',
+            (state) => state.runId === blocked.runId && attempts(state) > attempts(blocked),
+            60_000,
+          );
+
+          const accepted = await withTimeout(
+            handle.executeUpdate(triggerFailoverUpdate, {
+              args: [
+                {
+                  mode: 'forced',
+                  targetRegionId: 'west',
+                  reason: 'during continue-as-new',
+                  requestedBy: 'tester',
+                },
+              ],
+            }),
+            20_000,
+          );
+          expect(accepted, 'the failover Update must not hang').toMatchObject({ toRegionId: 'west' });
+          const state = await handle.query(getSentryStateQuery);
+          expect(state.timeline.some((event) => event.kind === 'CONTINUE_AS_NEW_DEFERRED')).toBe(true);
+        } finally {
+          releaseAlerts();
+        }
+      },
+      shortHistoryEnv,
+    );
+  }, 120_000);
 });

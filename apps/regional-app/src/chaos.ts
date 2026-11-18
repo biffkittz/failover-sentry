@@ -3,17 +3,7 @@
  * The console's chaos panel drives them; the sentry has to notice and react.
  */
 import type { ChaosSettings, ChaosUpdate } from '@failover-sentry/contracts';
-import { z } from 'zod';
-
-export const chaosUpdateSchema = z
-  .object({
-    health: z.enum(['healthy', 'degraded', 'down']),
-    latencyMs: z.number().int().min(0).max(30_000),
-    errorRate: z.number().min(0).max(1),
-    replication: z.enum(['normal', 'slow', 'stalled', 'drop-webhook', 'fail']),
-  })
-  .partial()
-  .strict();
+import { chaosUpdateSchema } from '@failover-sentry/contracts/schemas';
 
 const HEALTHY: ChaosSettings = { health: 'healthy', latencyMs: 0, errorRate: 0, replication: 'normal' };
 

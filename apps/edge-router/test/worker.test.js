@@ -1,8 +1,9 @@
 // @ts-check
+import { MAX_EPOCH as CONTRACTS_MAX_EPOCH } from '@failover-sentry/contracts';
 import { createSignatureHeader } from '@failover-sentry/contracts/signing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LocalKv } from '../src/local-kv.js';
-import { compareOrder, handleRequest, ROUTING_PATH } from '../src/worker.js';
+import { compareOrder, handleRequest, isRegionAdminPath, MAX_EPOCH, ROUTING_PATH } from '../src/worker.js';
 
 const secret = 'edge-admin-secret-0123456789abcdef';
 const origins = { east: 'https://east.example.net', west: 'https://west.example.net' };
@@ -98,6 +99,38 @@ describe('edge router', () => {
     expect(unknownRegion.status).toBe(400);
     const noRegion = await handleRequest(await putRouting({ ...active(), activeRegionId: null }), env);
     expect(noRegion.status).toBe(400);
+    // Inherited object properties are not regions.
+    const inherited = await handleRequest(await putRouting(active(1, 1, 'toString')), env);
+    expect(inherited.status).toBe(400);
+    const hugeEpoch = await handleRequest(await putRouting(active(MAX_EPOCH + 1, 1)), env);
+    expect(hugeEpoch.status).toBe(400);
+  });
+
+  it('caps epochs at the same value as the contracts', () => {
+    expect(MAX_EPOCH).toBe(CONTRACTS_MAX_EPOCH);
+  });
+
+  it("never proxies the regions' admin API, however the path is spelled", async () => {
+    const { env } = setup();
+    await handleRequest(await putRouting(active(1, 1, 'east')), env);
+    const upstream = vi.fn(async () => new Response('should not be reached'));
+    vi.stubGlobal('fetch', upstream);
+    for (const path of [
+      '/internal/power',
+      '/%69nternal/power',
+      '/INTERNAL/db/promote',
+      '//internal/chaos',
+      '/%E0%A4%A',
+    ]) {
+      const response = await handleRequest(
+        new Request(`https://dr.example.com${path}`, { method: 'POST' }),
+        env,
+      );
+      expect(response.status, path).toBe(404);
+    }
+    expect(upstream).not.toHaveBeenCalled();
+    expect(isRegionAdminPath('/internals/page')).toBe(false);
+    expect(isRegionAdminPath('/shop/internal/x')).toBe(false);
   });
 
   it('proxies to the active region and labels the response', async () => {

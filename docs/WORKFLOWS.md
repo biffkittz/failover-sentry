@@ -63,6 +63,10 @@ Each region's polling loop is a child workflow, `failover-sentry/<service>/monit
 - The console queries it directly (`getMonitorState`) for the probe history.
 - `ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED` makes cancellation complete only when the child has
   really stopped; `ParentClosePolicy.REQUEST_CANCEL` stops orphaned monitors if the sentry is terminated.
+- A child's cancellation targets the run the parent started, and a monitor that has continued as new is no longer
+  that run: the cancellation would never arrive, and the wait above would never end. So before cancelling the scope
+  the sentry cancels each started monitor by **workflow ID alone**, which reaches the current run of its chain
+  (`stopMonitors`).
 - A supervisor restarts a monitor that ends or fails, with backoff; if an old monitor with the same ID is still
   running (after a reset), it is cancelled first.
 
@@ -139,8 +143,11 @@ decides what they mean (adopt the higher epoch, or fail the step).
 
 The sentry never ends. It continues as new when the server suggests it (or past 20 000 events), between
 normal-operations cycles, after waiting for `allHandlersFinished()` and for background tasks (alert deliveries,
-recoveries). It carries everything that matters: epoch, active region, edge routing, region health and compute,
-recent failovers, alerts, timeline, processed webhook event IDs and its ID sequence.
+recoveries). A failover or reconfiguration requested during that wait can't finish before the main loop serves it,
+so the sentry defers continuing as new and serves it first (`CONTINUE_AS_NEW_DEFERRED` in the timeline) instead of
+waiting for it forever. It carries everything that matters: epoch, active region, edge routing, region health and
+compute, when the last failover ended, recent failovers, alerts, timeline, processed webhook event IDs and its ID
+sequence.
 
 ## Determinism and versioning
 
@@ -152,13 +159,23 @@ Node.js modules in `src/workflows/**`.
 the order or kind of activities, timers and child workflows with `patched('change-id')`, deploy, and remove the old
 branch only once no running history needs it. Local stacks can simply be reset (`docker compose down -v`).
 
+Patches in use (`sentry/sentry.ts`):
+
+| Patch ID | What it changed |
+| --- | --- |
+| `fresh-health-after-failover` | After a failover ends, decisions ignore health observed before it (no false split brain on the old primary's last "primary" report). |
+| `cancel-monitors-by-workflow-id` | Monitors are cancelled by workflow ID before the normal-operations scope, so one that continued as new still stops. |
+
 ## Testing
 
 - `apps/worker/test/domain`: the pure decision logic (health windows, target choice, automatic decisions,
   reconciliation plans).
 - `apps/worker/test/adapters`: signed HTTP clients against local servers, fencing refusals, Cloudflare challenges,
   the email payload.
-- `apps/worker/test/workflows`: twelve end-to-end scenarios against the Temporal CLI's dev server with a fake world
-  (`test/helpers/fake-world.ts`): bootstrap, automatic failover with fencing, manual planned failover, validator
-  rejections, stall → abort, stall → retry as forced, missing webhook, in-flight abort, stabilization anomaly →
-  revert, duplicate/stale webhooks, split-brain fencing, suspended automatic failover.
+- `apps/worker/test/workflows`: fifteen end-to-end scenarios against the Temporal CLI's dev server with a fake world
+  (`test/helpers/fake-world.ts`): bootstrap, automatic failover with fencing, manual planned failover (and no false
+  split brain after it), a second failover refused while the first takes over, validator rejections, stall → abort,
+  stall → retry as forced, missing webhook, in-flight abort, stabilization anomaly → revert, duplicate/stale
+  webhooks, split-brain fencing, suspended automatic failover. Two more run on a server that suggests continuing as
+  new after 150 events: failing over once the monitors have continued as new, and a failover requested while the
+  sentry waits to continue as new.

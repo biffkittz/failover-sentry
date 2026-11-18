@@ -110,6 +110,7 @@ GitHub OAuth App by hand. A shared registry stays, with the images in it; delete
 | --- | --- |
 | `MANIFEST_UNKNOWN` on apply | The image tag isn't in the registry: `az acr repository show-tags -n <registry> --repository failover-sentry/worker`. |
 | Plan fails reading the registry (`ResourceNotFound`) | `existing_container_registry` names a registry that doesn't exist (any more): check the name and resource group, or whether its owner destroyed it. |
+| The sentry ignores failover requests and region health stops updating | A sentry started before the `cancel-monitors-by-workflow-id` fix can wait forever for monitors that continued as new (every 300 probes, so after about 2.5 hours at 30 s). Its recorded history keeps the old behaviour on replay, so terminate it (`temporal workflow terminate -w failover-sentry/<service>`, or from the Temporal Cloud UI) and click **Start the sentry**: the new run adopts the edge's routing and epoch, and the old monitors are stopped when the new ones start. |
 | Console shows "Sentry not running" | The worker can't reach Temporal Cloud (check `TEMPORAL_ADDRESS`, the API key's namespace access) or the workflow was terminated: click **Start the sentry**. |
 | Replication always times out | The webhook doesn't arrive: check the console logs for `replication webhook relayed`; Bot Fight Mode (above); the regions' `WEBHOOK_SECRET` vs the console's `WEBHOOK_SIGNING_SECRET`. |
 | Fencing fails with 403 | The worker's role assignment hasn't propagated yet, or the custom role isn't assignable to the regional resource group. |

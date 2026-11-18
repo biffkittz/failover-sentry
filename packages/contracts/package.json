@@ -13,6 +13,10 @@
       "types": "./dist/config.d.ts",
       "import": "./dist/config.js"
     },
+    "./schemas": {
+      "types": "./dist/schemas.d.ts",
+      "import": "./dist/schemas.js"
+    },
     "./signing": {
       "types": "./dist/signing.d.ts",
       "import": "./dist/signing.js"

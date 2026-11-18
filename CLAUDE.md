@@ -48,6 +48,11 @@ docker compose up --build                               # the whole system local
 - **The worker image needs `ca-certificates`.** Temporal's native core trusts the OS CA store, which `node:*-slim`
   lacks; without it, connecting to Temporal Cloud fails with `NativeCertsNotFound`. Compose never shows this (its
   Temporal is plain text); CI's image job checks it.
+- **Authorization belongs to routes, not URL prefixes.** Fastify decodes percent-escapes before matching, so a
+  `request.url.startsWith('/internal/')` check is bypassed by `/%69nternal/...`. Register guards in the plugin scope
+  of the routes they protect (regional admin API), or check `request.routeOptions.url` (console CSRF).
+- **Cancelling a child that continued as new.** A child's cancellation targets the run the parent started; the
+  sentry cancels its monitors by workflow ID first (`stopMonitors`), or it would wait for them forever.
 - **Bot Fight Mode** on the zone can challenge the webhook and edge writes (docs/DEPLOYMENT.md).
 - **Secrets** live in Key Vault (per-secret RBAC) and, marked sensitive, in the remote state; never in tfvars, logs or
   `localStorage`.

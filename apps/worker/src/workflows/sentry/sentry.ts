@@ -63,6 +63,7 @@ import {
   getExternalWorkflowHandle,
   isCancellation,
   ParentClosePolicy,
+  patched,
   setHandler,
   sleep,
   startChild,
@@ -70,25 +71,38 @@ import {
   WorkflowIdReusePolicy,
 } from '@temporalio/workflow';
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/common';
-import {
-  chooseFailoverTarget,
-  decideAutomaticFailover,
-  planReconciliation,
-  type DecisionContext,
-  type ReconcileAction,
-} from '../../domain/decisions.js';
-import { alerts, compute, control, probeActivities, verification } from '../activities.js';
+import { decideAutomaticFailover, planReconciliation, type ReconcileAction } from '../../domain/decisions.js';
+import { alerts, control, probeActivities, verification } from '../activities.js';
 import { describeFailure } from '../errors.js';
 import { monitorRegionChild } from '../monitor-region.js';
 import { FailoverExecution, type FailoverHost } from './failover.js';
+import { recoverRegion } from './recovery.js';
 import { nowIso, SentryState, type FailoverTrigger } from './state.js';
+import {
+  requireActor,
+  resolveManualTarget,
+  validateAbortFailover,
+  validateAcknowledgeAlert,
+  validateRecoverRegion,
+  validateReconfigure,
+  validateResolveStall,
+  validateTriggerFailover,
+} from './validators.js';
 
 type NormalOperationsExit =
   { kind: 'failover'; trigger: FailoverTrigger } | { kind: 'reconfigure' } | { kind: 'continue-as-new' };
 
 /** History length at which the sentry continues as new even if the server hasn't suggested it yet. */
 const MAX_HISTORY_EVENTS = 20_000;
-const RECOVERY_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Patch: after a failover, decide only on health reports observed after it ended (see SentryState.healthValidSince).
+ * Histories recorded before it replay as they ran.
+ */
+export const PATCH_FRESH_HEALTH_AFTER_FAILOVER = 'fresh-health-after-failover';
+
+/** Patch: stop the monitors by workflow ID, reaching their current run (see stopMonitors). */
+export const PATCH_CANCEL_MONITORS_BY_ID = 'cancel-monitors-by-workflow-id';
 
 export class Sentry implements FailoverHost {
   readonly state: SentryState;
@@ -96,6 +110,8 @@ export class Sentry implements FailoverHost {
   private pendingReconfigure: ReconfigureRequest | null = null;
   private failoverScope: CancellationScope | null = null;
   private readonly backgroundTasks = new Set<Promise<void>>();
+  /** Regions whose monitor child has started (and not ended): the ones stopMonitors has to reach. */
+  private readonly startedMonitors = new Set<RegionId>();
   private lastFinishedFailoverId: string | null = null;
   private noTargetAlerted = false;
   private cooldownNoted = false;
@@ -122,7 +138,12 @@ export class Sentry implements FailoverHost {
           this.applyReconfigure();
           break;
         case 'continue-as-new':
-          return this.continueAsNewNow();
+          if (await this.readyToContinueAsNew()) {
+            return this.continueAsNewNow();
+          }
+          // An Update is waiting for the main loop (a failover or a reconfiguration): serve it first; normal
+          // operations will choose to continue as new again afterwards.
+          break;
       }
     }
   }
@@ -180,11 +201,13 @@ export class Sentry implements FailoverHost {
     if (!exit) {
       throw ApplicationFailure.nonRetryable('Normal operations ended without a reason');
     }
-    if (exit.kind === 'failover') {
-      this.pendingTrigger = null;
-    }
+    // A failover trigger stays pending until runFailover has taken over: while the monitors are still stopping,
+    // it is what makes the validators and the automatic decision refuse a second failover.
 
     // Stop the monitors, the reconciler and every timer they own before taking another branch.
+    if (patched(PATCH_CANCEL_MONITORS_BY_ID)) {
+      await this.stopMonitors();
+    }
     scope.cancel();
     try {
       await background;
@@ -238,7 +261,12 @@ export class Sentry implements FailoverHost {
           parentClosePolicy: ParentClosePolicy.REQUEST_CANCEL,
           workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE,
         });
-        await handle.result();
+        this.startedMonitors.add(region.id);
+        try {
+          await handle.result();
+        } finally {
+          this.startedMonitors.delete(region.id);
+        }
         this.state.record('MONITOR_ENDED', `The monitor of ${region.id} ended; restarting it`, {
           severity: 'warning',
           regionId: region.id,
@@ -264,6 +292,28 @@ export class Sentry implements FailoverHost {
       }
       await sleep(Math.min(60_000, 2_000 * 2 ** Math.min(restarts, 5)));
     }
+  }
+
+  /**
+   * Asks each monitor's current run to stop. Cancelling a child (as the scope's cancellation does) targets the run
+   * the parent started, and a monitor that has since continued as new never receives it: the scope would then
+   * wait for it forever. Cancelling by workflow ID alone reaches the current run of the chain; the scope's own
+   * cancellation then completes when that run has stopped.
+   *
+   * Only monitors that have started: one still starting is on its first run, which the scope's cancellation
+   * reaches (and Temporal refuses to start and cancel a child in the same workflow task).
+   */
+  private async stopMonitors(): Promise<void> {
+    const sentryWorkflowId = workflowInfo().workflowId;
+    await Promise.all(
+      [...this.startedMonitors].map(async (regionId) => {
+        try {
+          await getExternalWorkflowHandle(monitorWorkflowId(sentryWorkflowId, regionId)).cancel();
+        } catch {
+          // Ended meanwhile: nothing to stop.
+        }
+      }),
+    );
   }
 
   /** Keeps reality in line with the sentry's intent, one corrective action at a time. */
@@ -303,7 +353,7 @@ export class Sentry implements FailoverHost {
       return null;
     }
     const plan = planReconciliation({
-      ...this.decisionContext(),
+      ...this.state.decisionContext(),
       epoch: this.state.epoch,
       edge: this.state.edge,
     });
@@ -415,6 +465,7 @@ export class Sentry implements FailoverHost {
     const run = state.newFailoverRun(trigger, from, state.epoch);
     state.currentFailover = run;
     state.mode = 'FAILING_OVER';
+    this.pendingTrigger = null; // currentFailover guards from here on.
     if (trigger.kind === 'AUTOMATIC') {
       state.lastAutomaticFailoverAt = nowIso();
     }
@@ -453,6 +504,12 @@ export class Sentry implements FailoverHost {
       state.currentFailover = null;
       state.archive(run);
       this.lastFinishedFailoverId = run.id;
+      if (patched(PATCH_FRESH_HEALTH_AFTER_FAILOVER)) {
+        // Health observed before now describes the old roles (the old primary still "primary"); deciding on it
+        // would, for one, fence the old primary as a split brain right after every planned failover. The
+        // restarted monitors report within one probe interval.
+        state.healthValidSince = run.endedAt;
+      }
       if (state.mode === 'FAILING_OVER') {
         state.mode = 'NORMAL';
       }
@@ -581,26 +638,27 @@ export class Sentry implements FailoverHost {
     setHandler(getSentryStateQuery, () => this.state.view(this.cooldownUntil()));
     setHandler(regionHealthReportSignal, (report) => this.onHealthReport(report));
     setHandler(replicationCompleteSignal, (payload) => this.onReplicationComplete(payload));
+    const state = this.state;
     setHandler(triggerFailoverUpdate, (request) => this.onTriggerFailover(request), {
-      validator: (request) => this.validateTriggerFailover(request),
+      validator: (request) => validateTriggerFailover(state, request, this.pendingTrigger !== null),
     });
     setHandler(abortFailoverUpdate, (request) => this.onAbortFailover(request), {
-      validator: (request) => this.validateAbortFailover(request),
+      validator: (request) => validateAbortFailover(state, request, this.failoverScope !== null),
     });
     setHandler(setAutoFailoverUpdate, (request) => this.onSetAutoFailover(request), {
       validator: (request) => requireActor(request.requestedBy),
     });
     setHandler(resolveStallUpdate, (request) => this.onResolveStall(request), {
-      validator: (request) => this.validateResolveStall(request),
+      validator: (request) => validateResolveStall(state, request),
     });
     setHandler(acknowledgeAlertUpdate, (request) => this.onAcknowledgeAlert(request), {
-      validator: (request) => this.validateAcknowledgeAlert(request),
+      validator: (request) => validateAcknowledgeAlert(state, request),
     });
     setHandler(recoverRegionUpdate, (request) => this.onRecoverRegion(request), {
-      validator: (request) => this.validateRecoverRegion(request),
+      validator: (request) => validateRecoverRegion(state, request),
     });
     setHandler(reconfigureUpdate, (request) => this.onReconfigure(request), {
-      validator: (request) => this.validateReconfigure(request),
+      validator: (request) => validateReconfigure(state, request),
     });
   }
 
@@ -652,7 +710,7 @@ export class Sentry implements FailoverHost {
     }
     const lastAutomatic = this.state.lastAutomaticFailoverAt;
     const decision = decideAutomaticFailover({
-      ...this.decisionContext(),
+      ...this.state.decisionContext(),
       lastAutomaticFailoverAtMs: lastAutomatic ? Date.parse(lastAutomatic) : null,
     });
     switch (decision.kind) {
@@ -734,51 +792,8 @@ export class Sentry implements FailoverHost {
     });
   }
 
-  private validateTriggerFailover(request: ManualFailoverRequest): void {
-    requireActor(request.requestedBy);
-    if (this.state.currentFailover || this.pendingTrigger || this.state.mode === 'FAILING_OVER') {
-      throw new Error('A failover is already in progress');
-    }
-    if (request.mode !== 'planned' && request.mode !== 'forced') {
-      throw new Error('mode must be "planned" or "forced"');
-    }
-    const reason = request.reason?.trim() ?? '';
-    if (reason.length < 3 || reason.length > 500) {
-      throw new Error('reason must be 3 to 500 characters');
-    }
-    this.resolveManualTarget(request);
-  }
-
-  private resolveManualTarget(request: ManualFailoverRequest): RegionId {
-    const targetId = request.targetRegionId;
-    if (targetId) {
-      if (!this.state.region(targetId)) {
-        throw new Error(`Unknown region "${targetId}"`);
-      }
-      if (targetId === this.state.activeRegionId) {
-        throw new Error(`${targetId} is already the primary`);
-      }
-      const compute = this.state.regionCompute.get(targetId);
-      if (compute === 'stopped' || compute === 'starting') {
-        throw new Error(`${targetId}'s compute is ${compute}; recover the region first`);
-      }
-      const status = this.state.regionHealth.get(targetId)?.status ?? 'UNKNOWN';
-      if (request.mode === 'planned' && status !== 'HEALTHY') {
-        throw new Error(
-          `A planned failover needs a HEALTHY target, and ${targetId} is ${status}. A forced failover overrides this.`,
-        );
-      }
-      return targetId;
-    }
-    const choice = chooseFailoverTarget(this.decisionContext(), { allowDegraded: request.mode === 'forced' });
-    if (!choice.regionId) {
-      throw new Error(`No eligible failover target: ${choice.reason}`);
-    }
-    return choice.regionId;
-  }
-
   private async onTriggerFailover(request: ManualFailoverRequest): Promise<FailoverAccepted> {
-    const targetRegionId = this.resolveManualTarget(request);
+    const targetRegionId = resolveManualTarget(this.state, request);
     const failoverId = this.state.nextId('fo');
     const reason = request.reason.trim();
     this.pendingTrigger = {
@@ -809,17 +824,6 @@ export class Sentry implements FailoverHost {
       toRegionId: targetRegionId,
       mode: run?.mode ?? request.mode,
     };
-  }
-
-  private validateAbortFailover(request: AbortFailoverRequest): void {
-    requireActor(request.requestedBy);
-    const run = this.state.currentFailover;
-    if (!run || !this.failoverScope) {
-      throw new Error('No failover is in progress');
-    }
-    if (run.phase === 'COMPENSATING' || run.phase === 'DONE') {
-      throw new Error('The failover is already being reverted');
-    }
   }
 
   private onAbortFailover(request: AbortFailoverRequest): AbortFailoverResult {
@@ -865,17 +869,6 @@ export class Sentry implements FailoverHost {
     return { autoFailoverEnabled: state.autoFailoverEnabled };
   }
 
-  private validateResolveStall(request: ResolveStallRequest): void {
-    requireActor(request.requestedBy);
-    const run = this.state.currentFailover;
-    if (!run || run.phase !== 'AWAITING_OPERATOR' || !run.stall || run.stall.decision !== null) {
-      throw new Error('No stalled failover is waiting for a decision');
-    }
-    if (!['keep-waiting', 'retry-forced', 'abort'].includes(request.decision)) {
-      throw new Error('decision must be keep-waiting, retry-forced or abort');
-    }
-  }
-
   private onResolveStall(request: ResolveStallRequest): ResolveStallResult {
     const run = this.state.currentFailover;
     if (!run?.stall) {
@@ -886,17 +879,6 @@ export class Sentry implements FailoverHost {
     return { failoverId: run.id, decision: request.decision };
   }
 
-  private validateAcknowledgeAlert(request: AcknowledgeAlertRequest): void {
-    requireActor(request.requestedBy);
-    const alert = this.state.alerts.find((candidate) => candidate.id === request.alertId);
-    if (!alert) {
-      throw new Error(`Unknown alert ${request.alertId}`);
-    }
-    if (alert.acknowledgedBy) {
-      throw new Error(`Alert ${request.alertId} was already acknowledged by ${alert.acknowledgedBy}`);
-    }
-  }
-
   private onAcknowledgeAlert(request: AcknowledgeAlertRequest): AlertRecord {
     const alert = this.state.alerts.find((candidate) => candidate.id === request.alertId);
     if (!alert) {
@@ -905,29 +887,6 @@ export class Sentry implements FailoverHost {
     alert.acknowledgedBy = request.requestedBy;
     alert.acknowledgedAt = nowIso();
     return alert;
-  }
-
-  private validateRecoverRegion(request: RecoverRegionRequest): void {
-    requireActor(request.requestedBy);
-    const region = this.state.region(request.regionId);
-    if (!region) {
-      throw new Error(`Unknown region "${request.regionId}"`);
-    }
-    if (request.regionId === this.state.activeRegionId) {
-      throw new Error(`${request.regionId} is the primary; only a standby can be recovered`);
-    }
-    if (this.state.currentFailover?.fromRegionId === request.regionId) {
-      throw new Error(`${request.regionId} is the source of the failover in progress`);
-    }
-    const recovery = this.state.recoveries.get(request.regionId);
-    if (recovery && (recovery.phase === 'STARTING_COMPUTE' || recovery.phase === 'AWAITING_HEALTH')) {
-      throw new Error(`${request.regionId} is already being recovered`);
-    }
-    const compute = this.state.regionCompute.get(request.regionId);
-    const status = this.state.regionHealth.get(request.regionId)?.status;
-    if (compute !== 'stopped' && status !== 'UNHEALTHY') {
-      throw new Error(`${request.regionId} is neither stopped nor unhealthy; there is nothing to recover`);
-    }
   }
 
   private onRecoverRegion(request: RecoverRegionRequest): RecoverRegionAccepted {
@@ -943,70 +902,8 @@ export class Sentry implements FailoverHost {
       regionId: request.regionId,
     });
     // Runs in the background, outside normal operations: a failover starting meanwhile doesn't cancel it.
-    this.spawn(() => this.recoverRegion(request.regionId, recovery));
+    this.spawn(() => recoverRegion(this, request.regionId, recovery));
     return { recoveryId: recovery.id, regionId: request.regionId };
-  }
-
-  private async recoverRegion(regionId: RegionId, recovery: RegionRecovery): Promise<void> {
-    const name = this.state.displayName(regionId);
-    try {
-      this.state.regionCompute.set(regionId, 'starting');
-      const started = await compute.startRegionCompute({
-        regionId,
-        reason: `recovery requested by ${recovery.requestedBy}`,
-      });
-      recovery.phase = 'AWAITING_HEALTH';
-      recovery.detail = started.detail;
-      const sinceMs = Date.now();
-      const healthy = await condition(() => {
-        const health = this.state.regionHealth.get(regionId);
-        return Boolean(
-          health &&
-          Date.parse(health.observedAt) > sinceMs &&
-          health.status === 'HEALTHY' &&
-          health.lastProbe?.db?.role === 'replica',
-        );
-      }, RECOVERY_TIMEOUT_MS);
-      if (!healthy) {
-        throw ApplicationFailure.nonRetryable(
-          `${name} did not report HEALTHY as a replica within 10 minutes`,
-        );
-      }
-      this.state.regionCompute.set(regionId, 'running');
-      recovery.phase = 'DONE';
-      recovery.detail = 'Healthy and replicating as a standby';
-      this.raiseAlert(
-        'REGION_RECOVERED',
-        'info',
-        `${name} recovered`,
-        `${name} is back as a healthy standby.`,
-        {
-          regionId,
-        },
-      );
-    } catch (error) {
-      recovery.phase = 'FAILED';
-      recovery.detail = describeFailure(error);
-      this.state.regionCompute.set(regionId, 'unknown');
-      this.raiseAlert('RECOVERY_FAILED', 'warning', `Recovery of ${name} failed`, recovery.detail, {
-        regionId,
-      });
-    }
-  }
-
-  private validateReconfigure(request: ReconfigureRequest): void {
-    if (!request.configVersion) {
-      throw new Error('configVersion is required');
-    }
-    const ids = request.config.regions.map((region) => region.id);
-    if (ids.length < 2) {
-      throw new Error('A failover needs at least two regions');
-    }
-    if (!ids.includes(this.state.activeRegionId)) {
-      throw new Error(
-        `The new configuration drops ${this.state.activeRegionId}, the current primary; fail over first`,
-      );
-    }
   }
 
   private async onReconfigure(request: ReconfigureRequest): Promise<ReconfigureResult> {
@@ -1049,16 +946,6 @@ export class Sentry implements FailoverHost {
   // Helpers
   // -------------------------------------------------------------------------------------------------------------
 
-  private decisionContext(): DecisionContext {
-    return {
-      nowMs: Date.now(),
-      activeRegionId: this.state.activeRegionId,
-      regions: this.state.regionFacts(),
-      healthPolicy: this.state.config.health,
-      failoverPolicy: this.state.config.failover,
-    };
-  }
-
   private cooldownUntil(): string | null {
     const last = this.state.lastAutomaticFailoverAt;
     if (!last) {
@@ -1085,11 +972,27 @@ export class Sentry implements FailoverHost {
     this.backgroundTasks.add(promise);
   }
 
-  private async continueAsNewNow(): Promise<never> {
+  /**
+   * Waits until nothing would be lost by continuing as new: no alert delivery in flight and no Update half-handled.
+   * Returns false when an Update needs the main loop first: a failover or reconfiguration request waits for the
+   * main loop, so waiting for it to finish here would deadlock.
+   */
+  private async readyToContinueAsNew(): Promise<boolean> {
     const info = workflowInfo();
     this.state.record('CONTINUING_AS_NEW', `History reached ${info.historyLength} events; continuing as new`);
-    // Never drop an in-flight alert delivery or a half-handled Update.
-    await condition(() => this.backgroundTasks.size === 0 && allHandlersFinished());
+    const pendingWork = () => this.pendingTrigger !== null || this.pendingReconfigure !== null;
+    await condition(() => (this.backgroundTasks.size === 0 && allHandlersFinished()) || pendingWork());
+    if (pendingWork()) {
+      this.state.record(
+        'CONTINUE_AS_NEW_DEFERRED',
+        `A ${this.pendingTrigger ? 'failover' : 'reconfiguration'} was requested meanwhile; serving it first`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  private continueAsNewNow(): Promise<never> {
     return continueAsNew<(input: SentryWorkflowInput) => Promise<void>>({
       config: this.state.config,
       configVersion: this.state.configVersion,
@@ -1108,11 +1011,5 @@ async function settleAll(promises: Array<Promise<unknown>>): Promise<void> {
   const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (failure) {
     throw failure.reason;
-  }
-}
-
-function requireActor(requestedBy: string | undefined): void {
-  if (!requestedBy?.trim()) {
-    throw new Error('requestedBy is required');
   }
 }

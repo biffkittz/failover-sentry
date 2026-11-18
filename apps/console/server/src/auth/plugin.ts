@@ -42,12 +42,17 @@ async function auth(app: FastifyInstance, { config, github }: AuthOptions): Prom
   const cookieBase = { path: '/', httpOnly: true, secure, sameSite: 'lax' as const };
   const redirectUri = new URL('/auth/github/callback', config.publicUrl).toString();
 
+  // Checked on every request, not only at sign-in: removing a login from the allowlist ends its sessions at once.
+  const allowed = (login: string): boolean =>
+    config.auth.mode === 'github' ? config.auth.allowedUsers.includes(login.toLowerCase()) : true;
+
   app.decorateRequest('user', null);
   app.addHook('onRequest', async (request) => {
     const session = sessions.open<Session>(request.cookies[SESSION_COOKIE]);
-    request.user = isSessionValid(session)
-      ? { login: session.login, name: session.name, avatarUrl: session.avatarUrl }
-      : null;
+    request.user =
+      isSessionValid(session) && allowed(session.login)
+        ? { login: session.login, name: session.name, avatarUrl: session.avatarUrl }
+        : null;
   });
 
   app.decorate('requireUser', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -82,7 +87,7 @@ async function auth(app: FastifyInstance, { config, github }: AuthOptions): Prom
   app.get('/auth/github/callback', authLimit, async (request, reply) => {
     const query = request.query as { code?: string; state?: string; error?: string };
     const pending = oauthStates.open<OAuthState>(request.cookies[OAUTH_COOKIE]);
-    reply.clearCookie(OAUTH_COOKIE, { path: '/' });
+    reply.clearCookie(OAUTH_COOKIE, cookieBase);
     if (config.auth.mode !== 'github' || !github) {
       return reply.redirect('/login?error=github_disabled');
     }
@@ -108,7 +113,7 @@ async function auth(app: FastifyInstance, { config, github }: AuthOptions): Prom
         .catch((error: unknown) =>
           request.log.warn({ err: (error as Error).message }, 'token revocation failed'),
         );
-      if (!config.auth.allowedUsers.includes(user.login.toLowerCase())) {
+      if (!allowed(user.login)) {
         request.log.warn({ login: user.login }, 'sign-in refused: not on the allowlist');
         return reply.redirect('/login?error=not_allowed');
       }
@@ -130,7 +135,8 @@ async function auth(app: FastifyInstance, { config, github }: AuthOptions): Prom
   }
 
   app.post('/auth/logout', async (_request, reply) => {
-    reply.clearCookie(SESSION_COOKIE, { path: '/' });
+    // The same attributes as when it was set: browsers ignore a `__Host-` cookie (deletion included) without Secure.
+    reply.clearCookie(SESSION_COOKIE, cookieBase);
     return reply.code(204).send();
   });
 

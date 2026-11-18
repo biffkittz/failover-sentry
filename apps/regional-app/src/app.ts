@@ -11,15 +11,16 @@ import {
   type RegionalHealthResponse,
   type StaleEpochError,
 } from '@failover-sentry/contracts';
+import {
+  chaosOrderSchema,
+  demoteOrderSchema,
+  powerOrderSchema,
+  promoteOrderSchema,
+} from '@failover-sentry/contracts/schemas';
 import { verifySignatureHeader } from '@failover-sentry/contracts/signing';
-import Fastify, {
-  type FastifyInstance,
-  type FastifyReply,
-  type FastifyRequest,
-  type FastifyServerOptions,
-} from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import { z } from 'zod';
-import { chaosUpdateSchema, type ChaosController } from './chaos.js';
+import type { ChaosController } from './chaos.js';
 import type { SimulatedDatabase } from './database.js';
 import { renderStorefront } from './storefront.js';
 
@@ -35,24 +36,6 @@ export interface AppDependencies {
   logger?: FastifyServerOptions['logger'];
   sleep?: (ms: number) => Promise<void>;
 }
-
-const promoteSchema = z
-  .object({
-    failoverId: z.string().min(1).max(100),
-    epoch: z.number().int().min(1),
-    mode: z.enum(['planned', 'forced', 'restore']),
-  })
-  .strict();
-
-const demoteSchema = z
-  .object({
-    failoverId: z.string().min(1).max(100).nullable(),
-    epoch: z.number().int().min(0),
-    reason: z.string().max(300),
-  })
-  .strict();
-
-const powerSchema = z.object({ state: z.enum(['on', 'off']) }).strict();
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -88,10 +71,10 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
   });
   app.decorateRequest('rawBody', '');
 
-  // Chaos: power, outage, latency and error injection, applied before any route runs.
+  // Chaos: power, outage, latency and error injection, applied before any route runs. Decided by the matched
+  // route, not the raw URL, which can spell the same path differently (percent-escapes).
   app.addHook('onRequest', async (request, reply) => {
-    const path = request.url.split('?')[0] ?? '';
-    if (CHAOS_EXEMPT.has(path)) {
+    if (CHAOS_EXEMPT.has(request.routeOptions.url ?? '')) {
       return;
     }
     if (!deps.chaos.poweredOn) {
@@ -110,27 +93,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
     return undefined;
   });
 
-  // Admin API: every request must carry a valid signature over method, path and body.
-  app.addHook('preHandler', async (request, reply) => {
-    if (!request.url.startsWith('/internal/')) {
-      return undefined;
-    }
-    const result = await verifySignatureHeader({
-      secret: deps.adminSecrets,
-      method: request.method,
-      path: request.url,
-      body: request.rawBody,
-      header: request.headers[SIGNATURE_HEADER] as string | undefined,
-    });
-    if (!result.ok) {
-      request.log.warn({ reason: result.reason, url: request.url }, 'rejected unsigned admin request');
-      return reply
-        .code(401)
-        .send({ error: 'unauthorized', message: 'Invalid or missing request signature.' });
-    }
-    return undefined;
-  });
-
+  // Set before the admin plugin registers, so its routes inherit it.
   app.setErrorHandler((error: Error & { statusCode?: number }, _request, reply) => {
     if (error instanceof z.ZodError) {
       return reply.code(400).send({ error: 'invalid_request', message: z.prettifyError(error) });
@@ -179,15 +142,53 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
     };
   });
 
-  app.get(REGIONAL_PATHS.dbStatus, async () => deps.db.snapshot());
+  void app.register((admin) => adminRoutes(admin, deps));
 
-  app.post(REGIONAL_PATHS.promote, async (request: FastifyRequest, reply: FastifyReply) => {
-    const body = promoteSchema.parse(request.body);
-    const result = deps.db.promote(body, null);
-    if (result.kind === 'stale-epoch') {
-      return reply.code(409).send(staleEpoch(result.currentEpoch, body.epoch));
+  return app;
+}
+
+/**
+ * The admin API (`/internal/*`). Its own plugin scope, so the signature check below covers exactly these routes,
+ * whichever spelling of the URL reached them: the router decodes percent-escapes before matching, so a check on the
+ * raw URL (`/%69nternal/power`) could be bypassed.
+ */
+async function adminRoutes(admin: FastifyInstance, deps: AppDependencies): Promise<void> {
+  admin.addHook('preHandler', async (request, reply) => {
+    const result = await verifySignatureHeader({
+      secret: deps.adminSecrets,
+      method: request.method,
+      path: request.url,
+      body: request.rawBody,
+      header: request.headers[SIGNATURE_HEADER] as string | undefined,
+    });
+    if (!result.ok) {
+      request.log.warn({ reason: result.reason, url: request.url }, 'rejected unsigned admin request');
+      return reply
+        .code(401)
+        .send({ error: 'unauthorized', message: 'Invalid or missing request signature.' });
     }
-    request.log.info({ ...body, outcome: result.kind }, 'promotion order');
+    return undefined;
+  });
+
+  /** Orders name their region inside the signed body; one meant for a peer is refused (a replay, or a mix-up). */
+  const forThisRegion = (regionId: string): void => {
+    if (regionId !== deps.regionId) {
+      throw Object.assign(new Error(`This order is for ${regionId}, but this region is ${deps.regionId}.`), {
+        statusCode: 400,
+      });
+    }
+  };
+
+  admin.get(REGIONAL_PATHS.dbStatus, async () => deps.db.snapshot());
+
+  admin.post(REGIONAL_PATHS.promote, async (request, reply) => {
+    const { regionId, ...order } = promoteOrderSchema.parse(request.body);
+    forThisRegion(regionId);
+    const result = deps.db.promote(order, null);
+    if (result.kind === 'stale-epoch') {
+      return reply.code(409).send(staleEpoch(result.currentEpoch, order.epoch));
+    }
+    request.log.info({ ...order, outcome: result.kind }, 'promotion order');
     const response: PromoteResponse = {
       accepted: true,
       promotionId: result.promotion.promotionId,
@@ -196,28 +197,31 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
     return reply.code(result.kind === 'completed' ? 200 : 202).send(response);
   });
 
-  app.post(REGIONAL_PATHS.demote, async (request, reply) => {
-    const body = demoteSchema.parse(request.body);
-    const result = deps.db.demote(body);
+  admin.post(REGIONAL_PATHS.demote, async (request, reply) => {
+    const { regionId, ...order } = demoteOrderSchema.parse(request.body);
+    forThisRegion(regionId);
+    const result = deps.db.demote(order);
     if (result.kind === 'stale-epoch') {
-      return reply.code(409).send(staleEpoch(result.currentEpoch, body.epoch));
+      return reply.code(409).send(staleEpoch(result.currentEpoch, order.epoch));
     }
-    request.log.info({ ...body, changed: result.changed }, 'demotion order');
+    request.log.info({ ...order, changed: result.changed }, 'demotion order');
     const response: DemoteResponse = { demoted: true, db: deps.db.snapshot() };
     return response;
   });
 
-  app.get(REGIONAL_PATHS.chaos, async () => deps.chaos.get());
+  admin.get(REGIONAL_PATHS.chaos, async () => deps.chaos.get());
 
-  app.put(REGIONAL_PATHS.chaos, async (request) => {
-    const update = chaosUpdateSchema.parse(request.body ?? {});
+  admin.put(REGIONAL_PATHS.chaos, async (request) => {
+    const { regionId, ...update } = chaosOrderSchema.parse(request.body ?? {});
+    forThisRegion(regionId);
     const settings = deps.chaos.update(update);
     request.log.warn({ settings }, 'chaos settings changed');
     return settings;
   });
 
-  app.post(REGIONAL_PATHS.power, async (request) => {
-    const { state } = powerSchema.parse(request.body);
+  admin.post(REGIONAL_PATHS.power, async (request) => {
+    const { regionId, state } = powerOrderSchema.parse(request.body);
+    forThisRegion(regionId);
     if (state === 'off' && deps.chaos.poweredOn) {
       deps.chaos.setPower(false);
     } else if (state === 'on' && !deps.chaos.poweredOn) {
@@ -228,8 +232,6 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
     }
     return { power: deps.chaos.poweredOn ? 'on' : 'off' };
   });
-
-  return app;
 }
 
 function staleEpoch(currentEpoch: number, requestedEpoch: number): StaleEpochError {

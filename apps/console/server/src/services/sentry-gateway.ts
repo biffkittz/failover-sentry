@@ -95,7 +95,7 @@ export class TemporalSentryGateway implements SentryGateway {
     try {
       return await this.withDeadline(() => this.handle().query(getSentryStateQuery));
     } catch (error) {
-      if (error instanceof WorkflowNotFoundError || isClosedWorkflowQuery(error)) {
+      if (error instanceof WorkflowNotFoundError) {
         return null;
       }
       throw translate(error);
@@ -113,7 +113,7 @@ export class TemporalSentryGateway implements SentryGateway {
           .query(getMonitorStateQuery),
       );
     } catch (error) {
-      if (error instanceof WorkflowNotFoundError || isClosedWorkflowQuery(error)) {
+      if (error instanceof WorkflowNotFoundError) {
         throw new GatewayError(
           404,
           'monitor_not_running',
@@ -193,12 +193,6 @@ export class TemporalSentryGateway implements SentryGateway {
   private withDeadline<T>(work: () => Promise<T>): Promise<T> {
     return this.client.withDeadline(Date.now() + RPC_DEADLINE_MS, work);
   }
-}
-
-function isClosedWorkflowQuery(error: unknown): boolean {
-  return (
-    error instanceof Error && /workflow (execution )?(already )?completed|not found/i.test(error.message)
-  );
 }
 
 /** Maps Temporal errors to what an operator should see. */

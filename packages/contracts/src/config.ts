@@ -5,10 +5,7 @@
  */
 import { z } from 'zod';
 import type { SentryConfig } from './domain.js';
-
-const regionIdSchema = z
-  .string()
-  .regex(/^[a-z0-9][a-z0-9-]{0,30}$/, 'region ids are 1-31 lower-case letters, digits or hyphens');
+import { regionIdSchema } from './schemas.js';
 
 const httpUrlSchema = z.url({ protocol: /^https?$/ }).transform((value) => value.replace(/\/+$/, ''));
 

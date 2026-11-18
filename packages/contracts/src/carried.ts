@@ -31,4 +31,6 @@ export interface SentryCarriedState {
   /** Webhook event IDs already processed, so a late redelivery after continue-as-new is still ignored. */
   processedEventIds: string[];
   sequence: number;
+  /** When the last failover ended (decisions ignore older health). Absent in state carried by older versions. */
+  healthValidSince?: string | null;
 }

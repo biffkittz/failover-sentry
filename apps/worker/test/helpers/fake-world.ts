@@ -46,6 +46,8 @@ export class FakeWorld {
   readonly alerts: AlertRecord[] = [];
   readonly webhooks: ReplicationWebhookEvent[] = [];
   promotionDelayMs = 300;
+  /** While set, alert deliveries wait for it (holds the sentry's background tasks open). */
+  alertGate: Promise<void> | null = null;
   webhookSink: ((event: ReplicationWebhookEvent) => Promise<void>) | null = null;
   private eventCounter = 0;
 
@@ -263,6 +265,7 @@ export class FakeWorld {
 
       sendAlert: async ({ alert }) => {
         this.alerts.push(alert);
+        await this.alertGate;
         return { delivery: 'sent', detail: 'captured by the fake world' };
       },
     };

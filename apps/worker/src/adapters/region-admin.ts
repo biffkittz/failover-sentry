@@ -9,7 +9,9 @@ import {
   type ProbeResult,
   type PromoteRequest,
   type RegionConfig,
+  type RegionalOrder,
 } from '@failover-sentry/contracts';
+import { chaosSettingsSchema, epochSchema } from '@failover-sentry/contracts/schemas';
 import { signedFetch } from '@failover-sentry/contracts/signing';
 import { z } from 'zod';
 import {
@@ -24,7 +26,7 @@ import {
 const promotionSchema = z.object({
   promotionId: z.string(),
   failoverId: z.string(),
-  epoch: z.number(),
+  epoch: epochSchema,
   mode: z.enum(['planned', 'forced', 'restore']),
   status: z.enum(['catching-up', 'switching', 'completed', 'failed']),
   startedAt: z.string(),
@@ -34,7 +36,8 @@ const promotionSchema = z.object({
 
 export const databaseSnapshotSchema = z.object({
   role: z.enum(['primary', 'replica']),
-  epoch: z.number().int().min(0),
+  // Capped: a region answering with an absurd epoch is broken or forged, and its epoch must not be adopted.
+  epoch: epochSchema,
   lsn: z.number().int().min(0),
   appliedLsn: z.number().int().min(0),
   lagSeconds: z.number().nullable(),
@@ -46,15 +49,7 @@ const healthSchema = z.object({
   status: z.enum(['ok', 'degraded', 'down']),
   version: z.string(),
   db: databaseSnapshotSchema,
-  chaos: z
-    .object({
-      health: z.enum(['healthy', 'degraded', 'down']),
-      latencyMs: z.number(),
-      errorRate: z.number(),
-      replication: z.enum(['normal', 'slow', 'stalled', 'drop-webhook', 'fail']),
-    })
-    .nullable()
-    .catch(null),
+  chaos: chaosSettingsSchema.nullable().catch(null),
 });
 
 const orderResponseSchema = z.object({
@@ -62,7 +57,7 @@ const orderResponseSchema = z.object({
   db: databaseSnapshotSchema,
 });
 
-const staleEpochSchema = z.object({ error: z.literal('stale_epoch'), currentEpoch: z.number().int() });
+const staleEpochSchema = z.object({ error: z.literal('stale_epoch'), currentEpoch: epochSchema });
 
 export type OrderResult =
   | { outcome: 'ok'; db: DatabaseSnapshot; promotionId: string | null }
@@ -150,17 +145,20 @@ export class RegionAdminClient {
     return databaseSnapshotSchema.parse(json);
   }
 
+  // Every order names its region inside the signed body: a region refuses orders meant for a peer.
   async promote(regionId: string, request: PromoteRequest): Promise<OrderResult> {
-    return this.order(regionId, REGIONAL_PATHS.promote, request, `promotion of ${regionId}`);
+    const order: RegionalOrder<PromoteRequest> = { ...request, regionId };
+    return this.order(regionId, REGIONAL_PATHS.promote, order, `promotion of ${regionId}`);
   }
 
   async demote(regionId: string, request: DemoteRequest): Promise<OrderResult> {
-    return this.order(regionId, REGIONAL_PATHS.demote, request, `demotion of ${regionId}`);
+    const order: RegionalOrder<DemoteRequest> = { ...request, regionId };
+    return this.order(regionId, REGIONAL_PATHS.demote, order, `demotion of ${regionId}`);
   }
 
   /** Simulated compute (local runs): power a region off (fencing) or on (a fresh boot). */
   async setPower(regionId: string, state: 'on' | 'off'): Promise<void> {
-    const response = await this.send(regionId, 'POST', REGIONAL_PATHS.power, { state }, 10_000);
+    const response = await this.send(regionId, 'POST', REGIONAL_PATHS.power, { regionId, state }, 10_000);
     if (!response.ok) {
       throw this.failure(response, await response.text(), `power ${state} of ${regionId}`);
     }

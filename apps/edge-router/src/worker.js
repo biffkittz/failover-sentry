@@ -9,6 +9,7 @@
  *   PUT  /__edge/routing   The sentry's signed routing write. Writes are ordered by (epoch, version): a write that
  *                          is older than the one stored is refused with 409, so neither a stale sentry nor a delayed
  *                          retry can roll routing back (fencing).
+ *   /internal/*            Never proxied: the regions' admin API isn't reachable through the public host name.
  *   *                      Proxied to the active region, or a 503 holding page while the sentry fails over.
  *
  * Consistency: KV is eventually consistent across Cloudflare locations (reads here use a short cache TTL). The
@@ -47,6 +48,8 @@ export const ROUTING_KEY = 'routing';
 export const ROUTING_PATH = '/__edge/routing';
 const SIGNATURE_HEADER = 'x-sentry-signature';
 const SIGNATURE_TOLERANCE_SECONDS = 300;
+/** Same as MAX_EPOCH in @failover-sentry/contracts (this file can't import it: Terraform uploads it as is). */
+export const MAX_EPOCH = 1_000_000_000;
 const HOP_BY_HOP_HEADERS = [
   'host',
   'connection',
@@ -87,12 +90,16 @@ export async function handleRequest(request, env, options = {}) {
     }
     return json({ error: 'method_not_allowed' }, 405, { allow: 'GET, PUT' });
   }
+  if (isRegionAdminPath(url.pathname)) {
+    return json({ error: 'not_found', message: 'Not found.' }, 404);
+  }
 
   const routing = await readRouting(env, cacheTtl(env));
   if (!routing || routing.mode === 'maintenance' || !routing.activeRegionId) {
     return holdingPage(request, env, routing);
   }
-  const origin = parseOrigins(env)[routing.activeRegionId];
+  const origins = parseOrigins(env);
+  const origin = Object.hasOwn(origins, routing.activeRegionId) ? origins[routing.activeRegionId] : undefined;
   if (!origin) {
     return errorPage(
       request,
@@ -102,6 +109,22 @@ export async function handleRequest(request, env, options = {}) {
     );
   }
   return proxy(request, url, origin, routing);
+}
+
+/**
+ * The regions' admin API (signed, but meant for the sentry only) is not served through the edge, however the path
+ * is spelled: the regions' router decodes percent-escapes, so `/%69nternal/...` must count as well.
+ * @param {string} pathname
+ */
+export function isRegionAdminPath(pathname) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return true; // Malformed escapes: nothing legitimate looks like this.
+  }
+  const normalized = decoded.toLowerCase().replace(/\/{2,}/g, '/');
+  return normalized === '/internal' || normalized.startsWith('/internal/');
 }
 
 /**
@@ -212,13 +235,20 @@ export function validateUpdate(value, origins) {
   if (mode !== 'active' && mode !== 'maintenance') {
     return 'mode must be "active" or "maintenance".';
   }
-  if (!Number.isSafeInteger(epoch) || /** @type {number} */ (epoch) < 0) {
-    return 'epoch must be a non-negative integer.';
+  if (
+    !Number.isSafeInteger(epoch) ||
+    /** @type {number} */ (epoch) < 0 ||
+    /** @type {number} */ (epoch) > MAX_EPOCH
+  ) {
+    return `epoch must be an integer from 0 to ${MAX_EPOCH}.`;
   }
   if (!Number.isSafeInteger(version) || /** @type {number} */ (version) < 0) {
     return 'version must be a non-negative integer.';
   }
-  if (activeRegionId !== null && (typeof activeRegionId !== 'string' || !(activeRegionId in origins))) {
+  if (
+    activeRegionId !== null &&
+    (typeof activeRegionId !== 'string' || !Object.hasOwn(origins, activeRegionId))
+  ) {
     return `activeRegionId must be null or one of: ${Object.keys(origins).join(', ')}.`;
   }
   if (mode === 'active' && activeRegionId === null) {

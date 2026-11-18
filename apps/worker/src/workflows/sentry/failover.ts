@@ -54,10 +54,6 @@ interface StepResult {
 }
 
 export class FailoverExecution {
-  private touchedEdge = false;
-  private fenceAttempted = false;
-  private promotionRequested = false;
-  private edgeSwitchAttempted = false;
   private abortedByOperator = false;
 
   constructor(
@@ -75,6 +71,11 @@ export class FailoverExecution {
 
   private get to(): RegionId {
     return this.run.toRegionId;
+  }
+
+  /** Whether the forward path got as far as starting this step (what compensation has to undo). */
+  private started(name: FailoverStepName): boolean {
+    return this.run.steps.some((step) => step.name === name && step.status !== 'PENDING');
   }
 
   /** The forward path. Runs inside the sentry's cancellable failover scope. */
@@ -184,7 +185,6 @@ export class FailoverExecution {
   }
 
   private async drainEdge(): Promise<StepResult> {
-    this.touchedEdge = true;
     await this.host.writeEdge(
       { mode: 'maintenance', activeRegionId: this.from, failoverId: this.run.id },
       this.run.epoch,
@@ -193,7 +193,6 @@ export class FailoverExecution {
   }
 
   private async fenceOldPrimary(): Promise<StepResult> {
-    this.fenceAttempted = true;
     const notes: string[] = [];
     let warning = false;
     try {
@@ -247,7 +246,6 @@ export class FailoverExecution {
   }
 
   private async promoteTarget(): Promise<StepResult> {
-    this.promotionRequested = true;
     const result = await control.requestDatabasePromotion({
       regionId: this.to,
       epoch: this.run.epoch,
@@ -412,7 +410,6 @@ export class FailoverExecution {
   }
 
   private async switchEdge(): Promise<StepResult> {
-    this.edgeSwitchAttempted = true;
     const routing = await this.host.writeEdge(
       { mode: 'active', activeRegionId: this.to, failoverId: this.run.id },
       this.run.epoch,
@@ -490,7 +487,7 @@ export class FailoverExecution {
   async compensate(error: unknown): Promise<FailoverOutcome> {
     const cancelled = isCancellation(error) || this.abortedByOperator;
     this.run.phase = 'COMPENSATING';
-    if (!this.touchedEdge) {
+    if (!this.started('DRAIN_EDGE')) {
       this.compensation('Nothing to undo', 'SKIPPED', 'The failover stopped before changing anything');
       return cancelled ? 'ABORTED' : 'REVERTED';
     }
@@ -513,7 +510,7 @@ export class FailoverExecution {
     const revertEpoch = state.epoch;
     let ok = true;
 
-    if (this.edgeSwitchAttempted) {
+    if (this.started('SWITCH_EDGE')) {
       ok =
         (await this.attempt(`Drain the edge (it may route to ${this.to})`, () =>
           this.host.writeEdge(
@@ -522,7 +519,7 @@ export class FailoverExecution {
           ),
         )) && ok;
     }
-    if (this.promotionRequested) {
+    if (this.started('PROMOTE_DATABASE')) {
       ok =
         (await this.attempt(`Demote ${this.to}`, async () => {
           const result = await control.demoteDatabase({
@@ -536,7 +533,7 @@ export class FailoverExecution {
           }
         })) && ok;
     }
-    if (this.fenceAttempted || this.promotionRequested) {
+    if (this.started('FENCE_OLD_PRIMARY')) {
       ok =
         (await this.attempt(`Restore ${this.from} as primary`, async () => {
           const result = await control.requestDatabasePromotion({
@@ -568,7 +565,7 @@ export class FailoverExecution {
       ? 'its compute is stopped'
       : (oldPrimary.error ?? `HTTP ${oldPrimary.httpStatus}`);
     this.compensation(`Revert to ${this.from}`, 'SKIPPED', `Not possible: ${this.from} can't serve (${why})`);
-    if (this.promotionRequested) {
+    if (this.started('PROMOTE_DATABASE')) {
       const targetIsPrimary = await quickCheck.getDatabaseStatus({ regionId: this.to }).then(
         (db) => db.role === 'primary' && db.epoch >= this.run.epoch,
         () => false,

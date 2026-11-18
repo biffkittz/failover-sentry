@@ -9,6 +9,7 @@ import {
   type EdgeRoutingUpdate,
   REGIONAL_PATHS,
 } from '@failover-sentry/contracts';
+import { epochSchema } from '@failover-sentry/contracts/schemas';
 import { signedFetch } from '@failover-sentry/contracts/signing';
 import { z } from 'zod';
 import {
@@ -24,7 +25,7 @@ import { databaseSnapshotSchema } from './region-admin.js';
 const routingSchema = z.object({
   mode: z.enum(['active', 'maintenance']),
   activeRegionId: z.string().nullable(),
-  epoch: z.number().int().min(0),
+  epoch: epochSchema,
   version: z.number().int().min(0).catch(0),
   failoverId: z.string().nullable(),
   updatedAt: z.string(),

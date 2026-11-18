@@ -105,6 +105,64 @@ describe('authentication', () => {
   });
 });
 
+describe('sessions', () => {
+  it('signs out for real: the cookie deletions carry Secure, which browsers require for __Host- cookies', async () => {
+    ({ app } = await testApp());
+    const login = await app.inject({ method: 'GET', url: '/auth/github/login' });
+    const state = new URL(String(login.headers.location)).searchParams.get('state');
+    const callback = await app.inject({
+      method: 'GET',
+      url: `/auth/github/callback?code=abc&state=${state}`,
+      headers: { cookie: cookieHeader(login.headers['set-cookie']) },
+    });
+    const clearedState = [callback.headers['set-cookie']]
+      .flat()
+      .find((value) => value?.startsWith('__Host-sentry_oauth='));
+    expect(clearedState).toMatch(/Max-Age=0/);
+    expect(clearedState).toMatch(/; Secure/);
+
+    const logout = await app.inject({
+      method: 'POST',
+      url: '/auth/logout',
+      headers: { ...csrf, cookie: cookieHeader(callback.headers['set-cookie']) },
+    });
+    const cleared = String(logout.headers['set-cookie']);
+    expect(cleared).toMatch(/^__Host-sentry_session=;/);
+    expect(cleared).toMatch(/Max-Age=0/);
+    expect(cleared).toMatch(/; Secure/);
+    expect(cleared).toMatch(/HttpOnly/);
+  });
+
+  it('ends the sessions of a login removed from the allowlist', async () => {
+    ({ app } = await testApp());
+    const cookie = await signIn(app);
+    await app.close();
+    const config = testConfig();
+    ({ app } = await testApp({
+      config: { ...config, auth: { ...config.auth, allowedUsers: ['someone-else'] } as typeof config.auth },
+    }));
+    const me = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } });
+    expect(me.statusCode).toBe(401);
+  });
+
+  it('takes client error reports from signed-in users only', async () => {
+    ({ app } = await testApp());
+    const report = { method: 'POST' as const, url: '/api/client-errors', payload: { message: 'boom' } };
+    expect((await app.inject({ ...report, headers: csrf })).statusCode).toBe(401);
+    const cookie = await signIn(app);
+    expect((await app.inject({ ...report, headers: { ...csrf, cookie } })).statusCode).toBe(204);
+  });
+
+  it('answers /readyz from a short cache, so the public probe costs at most one Temporal call per window', async () => {
+    const gateway = fakeGateway();
+    ({ app } = await testApp({ gateway }));
+    for (let index = 0; index < 5; index += 1) {
+      expect((await app.inject({ method: 'GET', url: '/readyz' })).statusCode).toBe(200);
+    }
+    expect(gateway.ping).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('operator API', () => {
   it('refuses state-changing requests without the CSRF header or from another origin', async () => {
     ({ app } = await testApp());
@@ -124,6 +182,20 @@ describe('operator API', () => {
       payload: body,
     });
     expect(crossSite.statusCode).toBe(403);
+  });
+
+  it('applies the CSRF check by route, however the path is spelled', async () => {
+    const gateway = fakeGateway();
+    ({ app } = await testApp({ gateway }));
+    const cookie = await signIn(app);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/%61pi/sentry/failover',
+      headers: { cookie },
+      payload: { mode: 'forced', reason: 'cross-site' },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(gateway.triggerFailover).not.toHaveBeenCalled();
   });
 
   it('turns the emergency failover button into an Update carrying the operator', async () => {

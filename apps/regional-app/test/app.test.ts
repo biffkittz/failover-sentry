@@ -1,4 +1,4 @@
-import { REGIONAL_PATHS, SIGNATURE_HEADER } from '@failover-sentry/contracts';
+import { MAX_EPOCH, REGIONAL_PATHS, SIGNATURE_HEADER } from '@failover-sentry/contracts';
 import { createSignatureHeader } from '@failover-sentry/contracts/signing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
@@ -27,8 +27,9 @@ function setup() {
   return { app, db, chaos };
 }
 
-async function signed(method: 'GET' | 'POST' | 'PUT', url: string, body?: unknown) {
-  const payload = body === undefined ? '' : JSON.stringify(body);
+/** A signed admin request. Orders are addressed to this region ("east") unless the body names another. */
+async function signed(method: 'GET' | 'POST' | 'PUT', url: string, body?: Record<string, unknown>) {
+  const payload = body === undefined ? '' : JSON.stringify({ regionId: 'east', ...body });
   return {
     method,
     url,
@@ -75,9 +76,65 @@ describe('regional workload HTTP API', () => {
     });
     const tampered = await current.app.inject({
       ...request,
-      payload: JSON.stringify({ failoverId: 'x', epoch: 99, mode: 'restore' }),
+      payload: JSON.stringify({ regionId: 'east', failoverId: 'x', epoch: 99, mode: 'restore' }),
     });
     expect(tampered.statusCode).toBe(401);
+  });
+
+  it('requires a signature however the admin path is spelled', async () => {
+    current = setup();
+    const json = { 'content-type': 'application/json' };
+    // The router decodes percent-escapes before matching routes: these reach the admin routes too.
+    for (const url of ['/%69nternal/power', '/internal/%70ower', '/%69nternal%2Fpower']) {
+      const response = await current.app.inject({
+        method: 'POST',
+        url,
+        headers: json,
+        payload: '{"state":"off"}',
+      });
+      expect(response.statusCode, url).not.toBe(200);
+    }
+    const promote = await current.app.inject({
+      method: 'POST',
+      url: '/%69nternal/db/promote',
+      headers: json,
+      payload: JSON.stringify({ regionId: 'east', failoverId: 'evil', epoch: 99, mode: 'restore' }),
+    });
+    expect(promote.statusCode).toBe(401);
+    expect(current.chaos.poweredOn).toBe(true);
+    expect(current.db.snapshot()).toMatchObject({ role: 'replica', epoch: 0 });
+  });
+
+  it('refuses signed orders addressed to another region', async () => {
+    current = setup();
+    for (const [url, body] of [
+      [REGIONAL_PATHS.promote, { regionId: 'west', failoverId: 'x', epoch: 5, mode: 'restore' }],
+      [REGIONAL_PATHS.demote, { regionId: 'west', failoverId: null, epoch: 5, reason: 'replayed' }],
+      [REGIONAL_PATHS.power, { regionId: 'west', state: 'off' }],
+      [REGIONAL_PATHS.chaos, { regionId: 'west', health: 'down' }],
+    ] as const) {
+      const response = await current.app.inject(
+        await signed(url === REGIONAL_PATHS.chaos ? 'PUT' : 'POST', url, body),
+      );
+      expect(response.statusCode, url).toBe(400);
+      expect(response.json().message).toContain('is for west');
+    }
+    expect(current.chaos.poweredOn).toBe(true);
+    expect(current.chaos.get().health).toBe('healthy');
+    expect(current.db.snapshot()).toMatchObject({ role: 'replica', epoch: 0 });
+  });
+
+  it('refuses epochs above the cap, which would wedge the fencing', async () => {
+    current = setup();
+    const response = await current.app.inject(
+      await signed('POST', REGIONAL_PATHS.promote, {
+        failoverId: 'x',
+        epoch: MAX_EPOCH + 1,
+        mode: 'restore',
+      }),
+    );
+    expect(response.statusCode).toBe(400);
+    expect(current.db.snapshot().epoch).toBe(0);
   });
 
   it('promotes, refuses stale epochs and demotes with signed orders', async () => {

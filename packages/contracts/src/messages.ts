@@ -170,6 +170,12 @@ export interface PowerRequest {
   state: 'on' | 'off';
 }
 
+/**
+ * An admin order as sent to a region: the order plus the ID of the region it is for, inside the signed body. Regions
+ * refuse orders addressed to another region, so a captured order can't be replayed against a peer.
+ */
+export type RegionalOrder<T> = T & { regionId: RegionId };
+
 /** The regional workload's health endpoint. */
 export interface RegionalHealthResponse {
   regionId: RegionId;

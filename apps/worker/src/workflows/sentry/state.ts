@@ -23,7 +23,7 @@ import {
   type TimelineEvent,
 } from '@failover-sentry/contracts';
 import { workflowInfo } from '@temporalio/workflow';
-import type { RegionFacts } from '../../domain/decisions.js';
+import type { DecisionContext, RegionFacts } from '../../domain/decisions.js';
 
 export interface FailoverTrigger {
   failoverId: string;
@@ -63,6 +63,11 @@ export class SentryState {
   sequence: number;
   /** True when this run carries state from a previous run (continue-as-new). */
   readonly resumed: boolean;
+  /**
+   * When the last failover ended. Decisions ignore health snapshots observed before it: they describe the roles
+   * before the failover. Null when no failover has ended (or the run predates the patch that sets it).
+   */
+  healthValidSince: string | null;
 
   constructor(input: SentryWorkflowInput) {
     const carried = input.carried;
@@ -84,6 +89,7 @@ export class SentryState {
     this.timeline = carried?.timeline ?? [];
     this.processedEventIds = carried?.processedEventIds ?? [];
     this.sequence = carried?.sequence ?? 0;
+    this.healthValidSince = carried?.healthValidSince ?? null;
     for (const [regionId, snapshot] of Object.entries(carried?.regionHealth ?? {})) {
       this.regionHealth.set(regionId, snapshot);
     }
@@ -111,14 +117,31 @@ export class SentryState {
     return this.region(regionId)?.displayName ?? regionId;
   }
 
+  /** What the pure decision functions (domain/decisions.ts) need, at this moment of workflow time. */
+  decisionContext(): DecisionContext {
+    return {
+      nowMs: Date.now(),
+      activeRegionId: this.activeRegionId,
+      regions: this.regionFacts(),
+      healthPolicy: this.config.health,
+      failoverPolicy: this.config.failover,
+    };
+  }
+
+  /** What decisions are based on: health snapshots from before the last failover ended don't count. */
   regionFacts(): RegionFacts[] {
-    return this.config.regions.map((region, order) => ({
-      id: region.id,
-      displayName: region.displayName,
-      order,
-      health: this.regionHealth.get(region.id) ?? null,
-      compute: this.regionCompute.get(region.id) ?? 'unknown',
-    }));
+    const validSinceMs = this.healthValidSince === null ? null : Date.parse(this.healthValidSince);
+    return this.config.regions.map((region, order) => {
+      const health = this.regionHealth.get(region.id) ?? null;
+      const current = health && (validSinceMs === null || Date.parse(health.observedAt) >= validSinceMs);
+      return {
+        id: region.id,
+        displayName: region.displayName,
+        order,
+        health: current ? health : null,
+        compute: this.regionCompute.get(region.id) ?? 'unknown',
+      };
+    });
   }
 
   record(
@@ -277,6 +300,7 @@ export class SentryState {
       timeline: this.timeline,
       processedEventIds: this.processedEventIds,
       sequence: this.sequence,
+      healthValidSince: this.healthValidSince,
     };
   }
 }

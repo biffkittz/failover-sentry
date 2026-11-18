@@ -23,6 +23,13 @@ export const CSRF_HEADER = 'x-sentry-csrf';
 export const EDGE_REGION_HEADER = 'x-sentry-region';
 export const EDGE_EPOCH_HEADER = 'x-sentry-epoch';
 
+/**
+ * Highest epoch any component accepts. Epochs only go up by one per authority change, so this is never reached
+ * legitimately; the cap stops a forged near-`MAX_SAFE_INTEGER` epoch from making `epoch + 1` unsafe and wedging the
+ * fencing. The edge router (plain JavaScript) repeats this value.
+ */
+export const MAX_EPOCH = 1_000_000_000;
+
 /** Paths of the regional workload's admin API. */
 export const REGIONAL_PATHS = {
   health: '/healthz',

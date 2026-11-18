@@ -2,7 +2,8 @@
  * Talks to the other regions' databases: replicas poll the primary (simulated log shipping), and a node being
  * promoted in a planned failover fences the old primary.
  */
-import { REGIONAL_PATHS, type DemoteRequest } from '@failover-sentry/contracts';
+import { REGIONAL_PATHS, type DemoteRequest, type RegionalOrder } from '@failover-sentry/contracts';
+import { epochSchema } from '@failover-sentry/contracts/schemas';
 import { signedFetch } from '@failover-sentry/contracts/signing';
 import { z } from 'zod';
 import type { PeerDatabaseStatus } from './database.js';
@@ -19,7 +20,7 @@ export interface PeerClient {
 
 const peerStatusSchema = z.object({
   role: z.enum(['primary', 'replica']),
-  epoch: z.number().int().min(0),
+  epoch: epochSchema,
   lsn: z.number().int().min(0),
 });
 
@@ -47,7 +48,7 @@ export class HttpPeerClient implements PeerClient {
     const response = await signedFetch({
       url: `${peer.baseUrl}${REGIONAL_PATHS.demote}`,
       method: 'POST',
-      body: request,
+      body: { ...request, regionId: peer.regionId } satisfies RegionalOrder<DemoteRequest>,
       secret: this.secret,
       timeoutMs: this.timeoutMs,
     });

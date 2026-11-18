@@ -6,28 +6,12 @@ import {
   REGIONAL_PATHS,
   type ChaosSettings,
   type ChaosUpdate,
+  type RegionalOrder,
   type RegionConfig,
 } from '@failover-sentry/contracts';
+import { chaosSettingsSchema, chaosUpdateSchema } from '@failover-sentry/contracts/schemas';
 import { signedFetch } from '@failover-sentry/contracts/signing';
-import { z } from 'zod';
 import { GatewayError } from './sentry-gateway.js';
-
-export const chaosUpdateSchema = z
-  .object({
-    health: z.enum(['healthy', 'degraded', 'down']),
-    latencyMs: z.number().int().min(0).max(30_000),
-    errorRate: z.number().min(0).max(1),
-    replication: z.enum(['normal', 'slow', 'stalled', 'drop-webhook', 'fail']),
-  })
-  .partial()
-  .strict();
-
-const chaosSettingsSchema = z.object({
-  health: z.enum(['healthy', 'degraded', 'down']),
-  latencyMs: z.number(),
-  errorRate: z.number(),
-  replication: z.enum(['normal', 'slow', 'stalled', 'drop-webhook', 'fail']),
-});
 
 export interface ChaosService {
   get(regionId: string): Promise<ChaosSettings>;
@@ -46,10 +30,15 @@ export class HttpChaosService implements ChaosService {
   }
 
   update(regionId: string, update: ChaosUpdate): Promise<ChaosSettings> {
-    return this.call(regionId, 'PUT', chaosUpdateSchema.parse(update));
+    // Addressed to the region inside the signed body, so the order can't be replayed against a peer.
+    return this.call(regionId, 'PUT', { ...chaosUpdateSchema.parse(update), regionId });
   }
 
-  private async call(regionId: string, method: 'GET' | 'PUT', body?: ChaosUpdate): Promise<ChaosSettings> {
+  private async call(
+    regionId: string,
+    method: 'GET' | 'PUT',
+    body?: RegionalOrder<ChaosUpdate>,
+  ): Promise<ChaosSettings> {
     const region = this.regions.find((candidate) => candidate.id === regionId);
     if (!region) {
       throw new GatewayError(404, 'unknown_region', `Unknown region "${regionId}"`);

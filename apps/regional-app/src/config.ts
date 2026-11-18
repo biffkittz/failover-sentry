@@ -1,3 +1,4 @@
+import { regionIdSchema } from '@failover-sentry/contracts/schemas';
 import { z } from 'zod';
 import type { Peer } from './peer-client.js';
 
@@ -38,7 +39,7 @@ const peersSchema = z
 
 const envSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
-  REGION_ID: z.string().regex(/^[a-z0-9][a-z0-9-]{0,30}$/),
+  REGION_ID: regionIdSchema,
   REGION_NAME: z.string().min(1).optional(),
   APP_VERSION: z.string().default('dev'),
   PEERS: peersSchema,

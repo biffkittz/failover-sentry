@@ -7,24 +7,11 @@
  * has durably accepted the signal, and 5xx when it couldn't, so the sender retries.
  */
 import { REPLICATION_WEBHOOK_PATH, SIGNATURE_HEADER } from '@failover-sentry/contracts';
+import { replicationWebhookEventSchema } from '@failover-sentry/contracts/schemas';
 import { verifySignatureHeader } from '@failover-sentry/contracts/signing';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { SentryGateway } from '../services/sentry-gateway.js';
-
-const replicationEventSchema = z
-  .object({
-    eventId: z.string().min(1).max(200),
-    type: z.enum(['replication.promotion.completed', 'replication.promotion.failed']),
-    failoverId: z.string().min(1).max(100),
-    epoch: z.number().int().min(0),
-    regionId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,30}$/),
-    lsn: z.number().int().min(0),
-    dataLossTransactions: z.number().int().min(0),
-    occurredAt: z.string().max(40),
-    error: z.string().max(500).nullable(),
-  })
-  .strict();
 
 export interface WebhookDependencies {
   gateway: SentryGateway;
@@ -63,7 +50,7 @@ export async function webhookRoutes(app: FastifyInstance, deps: WebhookDependenc
       } catch {
         return reply.code(400).send({ error: 'invalid_request', message: 'Body is not JSON.' });
       }
-      const event = replicationEventSchema.safeParse(parsed);
+      const event = replicationWebhookEventSchema.safeParse(parsed);
       if (!event.success) {
         return reply.code(400).send({ error: 'invalid_request', message: z.prettifyError(event.error) });
       }
