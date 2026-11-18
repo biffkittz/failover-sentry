@@ -84,7 +84,7 @@ sequenceDiagram
   participant G as Webhook gateway (console)
   M->>S: signal regionHealthReport (UNHEALTHY)
   Note over S: decide: primary UNHEALTHY, standby HEALTHY,<br/>not cooling down → cancel normal-ops scope
-  S->>T: probe (PRECHECK); planned if old primary's DB answers
+  S->>T: PRECHECK: probe target (planned if old primary's DB answers)
   S->>E: DRAIN_EDGE: maintenance @ epoch N
   S->>P: FENCE: demote @ epoch N (forced: + stop compute via ARM)
   S->>T: PROMOTE_DATABASE @ epoch N
@@ -94,7 +94,7 @@ sequenceDiagram
   S->>T: VERIFY_PROMOTION (primary @ ≥ N)
   S->>E: SWITCH_EDGE: active → target @ epoch N
   S->>E: AWAIT_EDGE_PROPAGATION (poll until served)
-  S->>E: STABILIZATION: probe through the edge; anomalies → revert
+  S->>E: STABILIZATION: probe through the edge (anomalies → revert)
   Note over S: success: roles swap, normal operations restart
 ```
 

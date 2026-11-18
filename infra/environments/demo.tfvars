@@ -39,7 +39,7 @@ edge_hostname    = "dr.biffkittz.com"
 temporal_namespace = "sentry.joqqs"
 
 # The console's GitHub OAuth App (created by hand; callback https://sentry.biffkittz.com/auth/github/callback).
-github_oauth_client_id       = "Ov23lijK4onubMdrjg93"
+github_oauth_client_id       = "Ov23lim6345uxmNy0Rgp"
 console_allowed_github_users = ["biffkittz"]
 
 # Alert emails through Cloudflare Email Service: verified destination addresses of the Cloudflare account.
