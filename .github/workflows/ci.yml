@@ -100,4 +100,18 @@ jobs:
       - name: Build ${{ matrix.dockerfile }}
         env:
           DOCKERFILE: ${{ matrix.dockerfile }}
-        run: docker build --file "$DOCKERFILE" --build-arg APP_VERSION="${GITHUB_SHA::7}" .
+        run: docker build --file "$DOCKERFILE" --build-arg APP_VERSION="${GITHUB_SHA::7}" --tag image-under-test .
+      # Temporal's native core reads the OS CA certificates; without them every TLS connection (Temporal Cloud) fails
+      # with NativeCertsNotFound, which local runs (plain-text dev server) never show. A refused connection is the
+      # expected outcome here: it means the TLS setup got past loading the roots.
+      - name: Worker can set up TLS
+        if: matrix.dockerfile == 'apps/worker/Dockerfile'
+        run: |
+          docker run --rm --entrypoint node image-under-test --input-type=module -e "
+            import { NativeConnection } from '@temporalio/worker';
+            try {
+              await NativeConnection.connect({ address: '127.0.0.1:1', tls: true });
+            } catch (error) {
+              if (/NativeCerts/.test(String(error))) { console.error('No CA certificates for TLS:', error.message); process.exit(1); }
+              console.log('TLS roots load; expected connection error:', error.message);
+            }"

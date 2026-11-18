@@ -45,6 +45,9 @@ docker compose up --build                               # the whole system local
 - **The registry is login-app's** (`crloginappdemo7fyguj` via `existing_container_registry` in `demo.tfvars`). This
   configuration only reads it and grants AcrPull on it; login-app's Terraform owns it, so destroying that project
   deletes these images and grants.
+- **The worker image needs `ca-certificates`.** Temporal's native core trusts the OS CA store, which `node:*-slim`
+  lacks; without it, connecting to Temporal Cloud fails with `NativeCertsNotFound`. Compose never shows this (its
+  Temporal is plain text); CI's image job checks it.
 - **Bot Fight Mode** on the zone can challenge the webhook and edge writes (docs/DEPLOYMENT.md).
 - **Secrets** live in Key Vault (per-secret RBAC) and, marked sensitive, in the remote state; never in tfvars, logs or
   `localStorage`.

@@ -29,6 +29,12 @@ FROM manifests AS prod-deps
 RUN npm ci --no-audit --no-fund --omit=dev --workspace @failover-sentry/worker && npm cache clean --force
 
 FROM ${NODE_IMAGE} AS runtime
+# Temporal's native core (Rust) trusts the operating system's CA certificates, not Node.js's built-in bundle, and the
+# slim image has none: without this, a TLS connection (Temporal Cloud) fails with NativeCertsNotFound. Unpinned on
+# purpose: the package is the CA list, and the latest is the one to trust.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=prod-deps /repo/node_modules ./node_modules
