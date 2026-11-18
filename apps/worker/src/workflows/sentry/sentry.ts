@@ -104,6 +104,9 @@ export const PATCH_FRESH_HEALTH_AFTER_FAILOVER = 'fresh-health-after-failover';
 /** Patch: stop the monitors by workflow ID, reaching their current run (see stopMonitors). */
 export const PATCH_CANCEL_MONITORS_BY_ID = 'cancel-monitors-by-workflow-id';
 
+/** Patch: when the sentry itself is cancelled, stop its monitors by workflow ID before ending. */
+export const PATCH_STOP_MONITORS_ON_CANCEL = 'stop-monitors-on-cancel';
+
 export class Sentry implements FailoverHost {
   readonly state: SentryState;
   private pendingTrigger: FailoverTrigger | null = null;
@@ -128,6 +131,19 @@ export class Sentry implements FailoverHost {
     } else {
       await this.discover();
     }
+    try {
+      return await this.mainLoop();
+    } catch (error) {
+      if (isCancellation(error) && patched(PATCH_STOP_MONITORS_ON_CANCEL)) {
+        // The sentry itself was cancelled. Its monitors get the child cancellation too, but one that has continued
+        // as new misses it (and would keep probing for a sentry that is gone): stop them by workflow ID.
+        await CancellationScope.nonCancellable(() => this.stopMonitors());
+      }
+      throw error;
+    }
+  }
+
+  private async mainLoop(): Promise<never> {
     for (;;) {
       const exit = await this.runNormalOperations();
       switch (exit.kind) {
@@ -195,6 +211,9 @@ export class Sentry implements FailoverHost {
   private async runNormalOperations(): Promise<NormalOperationsExit> {
     const scope = new CancellationScope();
     const background = scope.run(() => settleAll([this.superviseMonitors(), this.reconcileLoop()]));
+    // Handled from the start: if the whole workflow is cancelled, the wait below rejects first and this promise is
+    // never awaited, and an unhandled rejection fails every workflow task (the sentry could never finish).
+    background.catch(() => undefined);
 
     await condition(() => this.exitReason() !== null);
     const exit = this.exitReason();

@@ -134,6 +134,27 @@ async function withSentry(
   });
 }
 
+/** Polls until the check passes (or fails the test after the timeout). */
+async function waitUntil(
+  description: string,
+  check: () => Promise<boolean>,
+  timeoutMs = 60_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Timed out waiting for: ${description}`);
+}
+
+/** The promise's value, or null when it takes longer than the timeout (for asserting that something doesn't hang). */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  return Promise.race([promise, new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs))]);
+}
+
 /** Update validators reject with WorkflowUpdateFailedError; the validator's message is its cause. */
 async function expectRejected(promise: Promise<unknown>, pattern: RegExp): Promise<void> {
   const error = await promise.then(
@@ -290,6 +311,37 @@ describe('failoverSentryWorkflow', () => {
         toRegionId: 'west',
         outcome: 'SUCCEEDED',
       });
+    });
+  });
+
+  it('ends cleanly when cancelled in the middle of a failover, after compensating', async () => {
+    const world = new FakeWorld(['east', 'west']);
+    await withSentry(world, {}, async ({ handle, waitFor }) => {
+      await waitFor('east established', established);
+      await waitFor(
+        'west observed healthy',
+        (state) => state.regions.find((region) => region.config.id === 'west')?.health?.status === 'HEALTHY',
+      );
+      world.region('west').promotionBehaviour = 'stall';
+      await handle.executeUpdate(triggerFailoverUpdate, {
+        args: [{ mode: 'planned', reason: 'drill', requestedBy: 'tester' }],
+      });
+      await waitFor(
+        'waiting for replication',
+        (state) => state.currentFailover?.phase === 'AWAIT_REPLICATION',
+      );
+      await handle.cancel();
+      const outcome = await withTimeout(
+        handle.result().then(
+          () => 'completed',
+          (error: Error & { cause?: Error }) => error.cause?.name ?? error.name,
+        ),
+        20_000,
+      );
+      expect(outcome, 'the cancelled sentry must close').toBe('CancelledFailure');
+      // The compensation ran before it ended: east is primary again and served.
+      expect(world.region('east').db.role).toBe('primary');
+      expect(world.edge).toMatchObject({ mode: 'active', activeRegionId: 'east' });
     });
   });
 
@@ -549,27 +601,6 @@ describe('failoverSentryWorkflow', () => {
   });
 });
 
-/** Polls until the check passes (or fails the test after the timeout). */
-async function waitUntil(
-  description: string,
-  check: () => Promise<boolean>,
-  timeoutMs = 60_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`Timed out waiting for: ${description}`);
-}
-
-/** The promise's value, or null when it takes longer than the timeout (for asserting that something doesn't hang). */
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
-  return Promise.race([promise, new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs))]);
-}
-
 describe('failoverSentryWorkflow continuing as new', () => {
   const historyLimit = 150;
   let shortHistoryEnv: TestWorkflowEnvironment;
@@ -623,6 +654,46 @@ describe('failoverSentryWorkflow continuing as new', () => {
           (state) => lastFailover(state)?.id === accepted?.failoverId,
         );
         expect(lastFailover(done)?.outcome).toBe('SUCCEEDED');
+      },
+      shortHistoryEnv,
+    );
+  }, 120_000);
+
+  it('ends cleanly when cancelled, stopping monitors that have continued as new', async () => {
+    const world = new FakeWorld(['east', 'west']);
+    await withSentry(
+      world,
+      {},
+      async ({ handle, waitFor }) => {
+        await waitFor('east established', established);
+        const monitors = ['east', 'west'].map((region) =>
+          shortHistoryEnv.client.workflow.getHandle(`${handle.workflowId}/monitor/${region}`),
+        );
+        await waitUntil('both monitors continued as new', async () => {
+          const views = await Promise.all(
+            monitors.map((monitor) => monitor.query(getMonitorStateQuery).catch(() => null)),
+          );
+          return views.every((view) => (view?.continuedAsNewCount ?? 0) >= 1);
+        });
+        await handle.cancel();
+        const outcome = await withTimeout(
+          handle.result().then(
+            () => 'completed',
+            (error: Error & { cause?: Error }) => error.cause?.name ?? error.name,
+          ),
+          20_000,
+        );
+        expect(outcome, 'the cancelled sentry must close').toBe('CancelledFailure');
+        await waitUntil(
+          'both monitors stopped',
+          async () => {
+            const statuses = await Promise.all(
+              monitors.map(async (monitor) => (await monitor.describe()).status.name),
+            );
+            return statuses.every((status) => status !== 'RUNNING');
+          },
+          20_000,
+        );
       },
       shortHistoryEnv,
     );

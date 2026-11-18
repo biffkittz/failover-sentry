@@ -1,5 +1,5 @@
 /** Failover Sentry console: serves the Vue app and its API, and relays webhooks to the sentry. */
-import { Client, Connection, type ConnectionOptions } from '@temporalio/client';
+import { Client, Connection, QueryRejectCondition, type ConnectionOptions } from '@temporalio/client';
 import { loadClientConnectConfig } from '@temporalio/envconfig';
 import { buildApp } from './app.js';
 import { HttpGitHubClient } from './auth/github.js';
@@ -11,7 +11,13 @@ const config = loadConsoleConfig();
 const { connectionOptions, namespace = 'default' } = loadClientConnectConfig();
 // Connects on first use, so the console starts (and serves its login page) even while Temporal is unreachable.
 const connection = Connection.lazy(connectionOptions as ConnectionOptions);
-const client = new Client({ connection, namespace });
+// Temporal answers queries on closed workflows from their history; reject them instead, so a cancelled or
+// terminated sentry shows as not running (with the console's Start button) rather than as its last state.
+const client = new Client({
+  connection,
+  namespace,
+  workflow: { queryRejectCondition: QueryRejectCondition.NOT_OPEN },
+});
 const gateway = new TemporalSentryGateway(client, config.sentry, config.taskQueue);
 
 const app = await buildApp({

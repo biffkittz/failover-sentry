@@ -177,6 +177,7 @@ Patches in use (`sentry/sentry.ts`):
 | --- | --- |
 | `fresh-health-after-failover` | After a failover ends, decisions ignore health observed before it (no false split brain on the old primary's last "primary" report). |
 | `planned-needs-replicating-target` | The precheck refuses a planned failover to a target not in contact with the primary. |
+| `stop-monitors-on-cancel` | When the sentry itself is cancelled, it stops its monitors by workflow ID before ending. |
 | `cancel-monitors-by-workflow-id` | Monitors are cancelled by workflow ID before the normal-operations scope, so one that continued as new still stops. |
 
 ## Testing
@@ -185,10 +186,11 @@ Patches in use (`sentry/sentry.ts`):
   reconciliation plans).
 - `apps/worker/test/adapters`: signed HTTP clients against local servers, fencing refusals, Cloudflare challenges,
   the email payload.
-- `apps/worker/test/workflows`: sixteen end-to-end scenarios against the Temporal CLI's dev server with a fake world
+- `apps/worker/test/workflows`: eighteen end-to-end scenarios against the Temporal CLI's dev server with a fake world
   (`test/helpers/fake-world.ts`): bootstrap, automatic failover with fencing, manual planned failover (and no false
-  split brain after it), a planned failover refused at the precheck when the target can't reach the primary, a second failover refused while the first takes over, validator rejections, stall → abort,
+  split brain after it), a planned failover refused at the precheck when the target can't reach the primary, cancelling the sentry in
+  the middle of a failover (it compensates, then ends), a second failover refused while the first takes over, validator rejections, stall → abort,
   stall → retry as forced, missing webhook, in-flight abort, stabilization anomaly → revert, duplicate/stale
   webhooks, split-brain fencing, suspended automatic failover. Two more run on a server that suggests continuing as
-  new after 150 events: failing over once the monitors have continued as new, and a failover requested while the
-  sentry waits to continue as new.
+  new after 150 events: failing over once the monitors have continued as new, cancelling the sentry then (its
+  monitors stop too), and a failover requested while the sentry waits to continue as new.

@@ -32,6 +32,7 @@ import {
 } from '@failover-sentry/contracts/temporal';
 import {
   isGrpcDeadlineError,
+  QueryRejectedError,
   WorkflowUpdateFailedError,
   WorkflowUpdateRPCTimeoutOrCancelledError,
   type Client,
@@ -95,7 +96,8 @@ export class TemporalSentryGateway implements SentryGateway {
     try {
       return await this.withDeadline(() => this.handle().query(getSentryStateQuery));
     } catch (error) {
-      if (error instanceof WorkflowNotFoundError) {
+      // Rejected: the workflow is closed (cancelled, terminated, failed); the client rejects queries to closed ones.
+      if (error instanceof WorkflowNotFoundError || error instanceof QueryRejectedError) {
         return null;
       }
       throw translate(error);
@@ -113,7 +115,7 @@ export class TemporalSentryGateway implements SentryGateway {
           .query(getMonitorStateQuery),
       );
     } catch (error) {
-      if (error instanceof WorkflowNotFoundError) {
+      if (error instanceof WorkflowNotFoundError || error instanceof QueryRejectedError) {
         throw new GatewayError(
           404,
           'monitor_not_running',
