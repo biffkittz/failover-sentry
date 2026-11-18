@@ -1,0 +1,13 @@
+// Tooling that runs in Node.js: Vite, Vitest, Playwright and ESLint configuration, and the end-to-end tests.
+{
+  "extends": "@tsconfig/node24/tsconfig.json",
+  "include": ["vite.config.*", "vitest.config.*", "playwright.config.*", "eslint.config.*", "e2e/**/*.ts"],
+  "compilerOptions": {
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "noEmit": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo"
+  }
+}

@@ -1,0 +1,255 @@
+You are an expert in building distributed systems using Temporal and Node. You must architect and build a Temporal app along the following lines:
+
+The Multi-Cloud Disaster Recovery Failover Sentry
+
+In high-availability enterprise infrastructure, automated failover between primary cloud regions (or distinct providers like Azure and AWS) is notoriously difficult to write reliably without ending up in split-brain states or running into race conditions. This workflow acts as an autonomous, durable sentry that monitors regional health, orchestrates database promotion, redirects edge routing, and safely reverts if anomalies occur.
+
+How it highlights advanced Temporal TypeScript features:
+
+    Child Workflows for Regional Isolation: The main orchestrator workflow spawns dedicated Child Workflows (monitorRegionChild) for each monitored data center. This isolates the polling and health-check loops while allowing the parent workflow to aggregate status cleanly.
+
+    Cancellation Scopes for Rapid Interruptions: If a manual emergency failover button is pressed via an Update, or if automated health checks drop below threshold, the workflow uses Temporal's CancellationScope to instantly cancel the active "Normal Operations" monitoring loops and switch execution branches without leaking dangling background timers.
+
+    External Signals & Webhook Gateways: The failover process often requires waiting for asynchronous downstream confirmations (e.g., DNS propagation or replica sync completion). The workflow pauses execution using wf.condition() while listening for external webhook Signals (replicationCompleteSignal), backed by a durable timeout so it can trigger an automated alert if sync stalls.
+
+
+The Temporal workers and activities will all be written in TypeScript and use the Temporal TypeScript SDK. You should also architect a small client application that visualizes workflow information and allows the client to interact with the workflow. You can use Vue 3 as the frontend framework for whatever client you decide to write. The client and worker apps should be containerized and you should write Dockerfiles.
+
+The infrastructure for this project will live in Azure and Cloudflare. The infrastructure should include some (cheap!) Azure resources upon which the Temporal workflows can act upon. The client app should integrate with GitHub OAuth and it's url should be sentry.biffkittz.com.
+
+You should write the Terraform for the required infrastructure and follow these guidelines:
+
+** You are an expert infrastructure and devops engineer specializing in Terraform and infrastructure as code principles. You must adhere
+  to the following Terraform development guidelines:
+  1. Use Latest Terraform and Providers
+
+  Always target the latest stable Terraform version and Azure providers. In code, specify the required Terraform and provider versions to enforce this. Keep provider versions updated to get new features and fixes.
+
+  2. Organize Code Cleanly
+
+  Structure Terraform configurations with logical file separation:
+
+      Use main.tf for resources
+      Use variables.tf for inputs
+      Use outputs.tf for outputs
+      Follow consistent naming conventions and formatting (terraform fmt)
+
+  This makes the code easy to navigate and maintain.
+
+  3. Encapsulate in Modules
+
+  Use Terraform modules to group reusable infrastructure components. For any resource set that will be used in multiple contexts:
+
+      Create a module with its own variables/outputs
+      Reference it rather than duplicating code
+      This promotes reuse and consistency
+
+  4. Leverage Variables and Outputs
+
+      Parameterize all configurable values using variables with types and descriptions
+      Provide default values where appropriate for optional variables
+      Use outputs to expose key resource attributes for other modules or user reference
+      Mark sensitive values accordingly to protect secrets
+
+  5. Provider Selection (AzureRM vs AzAPI)
+
+      Use azurerm provider for most scenarios – it offers high stability and covers the majority of Azure services
+      Use azapi provider only for cases where you need:
+          The very latest Azure features
+          A resource not yet supported in azurerm
+      Document the choice in code comments
+      Both providers can be used together if needed, but prefer azurerm when in doubt
+
+  6. Minimal Dependencies
+
+      Do not introduce additional providers or modules beyond the project's scope without confirmation
+      If a special provider (e.g., random, tls) or external module is needed:
+          Add a comment to explain
+          Ensure the user approves it
+      Keep the infrastructure stack lean and avoid unnecessary complexity
+
+  7. Ensure Idempotency
+
+      Write configurations that can be applied repeatedly with the same outcome
+      Avoid non-idempotent actions:
+          Scripts that run on every apply
+          Resources that might conflict if created twice
+      Test by doing multiple terraform apply runs and ensure the second run results in zero changes
+      Use resource lifecycle settings or conditional expressions to handle drift or external changes gracefully
+
+  8. State Management
+
+      Use a remote backend (like Azure Storage with state locking) to store Terraform state securely
+      Enable team collaboration
+      Never commit state files to source control
+      This prevents conflicts and keeps the infrastructure state consistent
+
+  9. Document and Diagram
+
+      Maintain up-to-date documentation
+      Update README.md with any new variables, outputs, or usage instructions whenever the code changes
+      Consider using tools like terraform-docs for automation
+      Update architecture diagrams to reflect infrastructure changes after each significant update
+      Well-documented code and diagrams ensure the whole team understands the infrastructure
+
+  10. Validate and Test Changes
+
+      Run terraform validate and review the terraform plan output before applying changes
+      Catch errors or unintended modifications early
+      Consider implementing automated checks:
+          CI pipeline
+          Pre-commit hooks
+          Enforce formatting, linting, and basic validation
+
+
+You can use the following Terraform backend:
+
+  backend "azurerm" {
+    resource_group_name  = "rg-terraform-state"
+    storage_account_name = "demonstration"
+    container_name       = "terraform"
+    key                  = "temporal-node.terraform.tfstate" # Path and filename inside the container
+
+    # Authenticate using Azure CLI credentials & Entra ID instead of Storage Keys
+    #use_cli              = true
+    #use_azuread_auth     = true
+  }
+
+
+** You must adhere to the following Vue 3 development guidelines:
+  Architecture
+    Favor the Composition API (setup functions and composables) over the Options API
+    Organize components and composables by feature or domain for scalability
+    Separate UI-focused components (presentational) from logic-focused components (containers)
+    Extract reusable logic into composable functions in a composables/ directory
+    Structure store modules (Pinia) by domain, with clearly defined actions, state, and getters
+
+  TypeScript Integration
+    Enable strict mode in tsconfig.json for maximum type safety
+    Use defineComponent or <script setup lang="ts"> with defineProps and defineEmits
+    Leverage PropType<T> for typed props and default values
+    Use interfaces or type aliases for complex prop and state shapes
+    Define types for event handlers, refs, and useRoute/useRouter hooks
+    Implement generic components and composables where applicable
+
+  Component Design
+      Adhere to the single responsibility principle for components
+      Use PascalCase for component names and kebab-case for file names
+      Keep components small and focused on one concern
+      Use <script setup> syntax for brevity and performance
+      Validate props with TypeScript; use runtime checks only when necessary
+      Favor slots and scoped slots for flexible composition
+
+  State Management
+      Use Pinia for global state: define stores with defineStore
+      For simple local state, use ref and reactive within setup
+      Use computed for derived state
+      Keep state normalized for complex structures
+      Use actions in Pinia stores for asynchronous logic
+      Leverage store plugins for persistence or debugging
+
+  Composition API Patterns
+      Create reusable composables for shared logic, e.g., useFetch, useAuth
+      Use watch and watchEffect with precise dependency lists
+      Cleanup side effects in onUnmounted or watch cleanup callbacks
+      Use provide/inject sparingly for deep dependency injection
+      Use useAsyncData or third-party data utilities (Vue Query)
+
+  Styling
+      Use <style scoped> for component-level styles or CSS Modules
+      Consider utility-first frameworks (Tailwind CSS) for rapid styling
+      Follow BEM or functional CSS conventions for class naming
+      Leverage CSS custom properties for theming and design tokens
+      Implement mobile-first, responsive design with CSS Grid and Flexbox
+      Ensure styles are accessible (contrast, focus states)
+
+  Performance Optimization
+      Lazy-load components with dynamic imports and defineAsyncComponent
+      Use <Suspense> for async component loading fallbacks
+      Apply v-once and v-memo for static or infrequently changing elements
+      Profile with Vue DevTools Performance tab
+      Avoid unnecessary watchers; prefer computed where possible
+      Tree-shake unused code and leverage Vite’s optimization features
+
+  Data Fetching
+      Use composables like useFetch (Nuxt) or libraries like Vue Query
+      Handle loading, error, and success states explicitly
+      Cancel stale requests on component unmount or param change
+      Implement optimistic updates with rollbacks on failure
+      Cache responses and use background revalidation
+
+  Error Handling
+      Use global error handler (app.config.errorHandler) for uncaught errors
+      Wrap risky logic in try/catch; provide user-friendly messages
+      Use errorCaptured hook in components for local boundaries
+      Display fallback UI or error alerts gracefully
+      Log errors to external services (Sentry, LogRocket)
+
+  Forms and Validation
+      Use libraries like VeeValidate or @vueuse/form for declarative validation
+      Build forms with controlled v-model bindings
+      Validate on blur or input with debouncing for performance
+      Handle file uploads and complex multi-step forms in composables
+      Ensure accessible labeling, error announcements, and focus management
+
+  Routing
+      Use Vue Router 4 with createRouter and createWebHistory
+      Implement nested routes and route-level code splitting
+      Protect routes with navigation guards (beforeEnter, beforeEach)
+      Use useRoute and useRouter in setup for programmatic navigation
+      Manage query params and dynamic segments properly
+      Implement breadcrumb data via route meta fields
+
+  Testing
+      Write unit tests with Vue Test Utils and Jest
+      Focus on behavior, not implementation details
+      Use mount and shallowMount for component isolation
+      Mock global plugins (router, Pinia) as needed
+      Add end-to-end tests with Cypress or Playwright
+      Test accessibility using axe-core integration
+
+  Security
+      Avoid using v-html; sanitize any HTML inputs rigorously
+      Use CSP headers to mitigate XSS and injection attacks
+      Validate and escape data in templates and directives
+      Use HTTPS for all API requests
+      Store sensitive tokens in HTTP-only cookies, not localStorage
+
+  Accessibility
+      Use semantic HTML elements and ARIA attributes
+      Manage focus for modals and dynamic content
+      Provide keyboard navigation for interactive components
+      Add meaningful alt text for images and icons
+      Ensure color contrast meets WCAG AA standards
+
+  Implementation Process
+      Plan component and composable architecture
+      Initialize Vite project with Vue 3 and TypeScript
+      Define Pinia stores and composables
+      Create core UI components and layout
+      Integrate routing and navigation
+      Implement data fetching and state logic
+      Build forms with validation and error states
+      Add global error handling and fallback UIs
+      Add unit and E2E tests
+      Optimize performance and bundle size
+      Ensure accessibility compliance
+      Document components, composables, and stores
+
+  Additional Guidelines
+      Follow Vue’s official style guide (vuejs.org/style-guide)
+      Use ESLint (with plugin:vue/vue3-recommended) and Prettier for code consistency
+      Write meaningful commit messages and maintain clean git history
+      Keep dependencies up to date and audit for vulnerabilities
+      Document complex logic with JSDoc/TSDoc
+      Use Vue DevTools for debugging and profiling
+
+  Common Patterns
+      Renderless components and scoped slots for flexible UI
+      Compound components using provide/inject
+      Custom directives for cross-cutting concerns
+      Teleport for modals and overlays
+      Plugin system for global utilities (i18n, analytics)
+      Composable factories for parameterized logic
+
+AS ALWAYS, please ask me questions if you determine you need my input to make a decision.

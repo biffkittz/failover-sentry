@@ -1,0 +1,32 @@
+{
+  "name": "@failover-sentry/worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Temporal worker of the Failover Sentry: the orchestrator and per-region monitor workflows, and the activities that act on regions, the edge and alerts.",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node dist/scripts/bundle-workflows.js",
+    "start": "node dist/main.js",
+    "dev": "tsx watch src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@azure/arm-appcontainers": "^4.0.0",
+    "@azure/arm-resources": "^8.0.0",
+    "@azure/identity": "^4.14.1",
+    "@failover-sentry/contracts": "0.1.0",
+    "@temporalio/activity": "1.26.0",
+    "@temporalio/client": "1.26.0",
+    "@temporalio/common": "1.26.0",
+    "@temporalio/envconfig": "1.26.0",
+    "@temporalio/worker": "1.26.0",
+    "@temporalio/workflow": "1.26.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@temporalio/testing": "1.26.0"
+  }
+}

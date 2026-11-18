@@ -1,0 +1,39 @@
+{
+  "name": "failover-sentry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-region disaster recovery failover sentry built on Temporal (TypeScript SDK), with a Vue 3 console.",
+  "type": "module",
+  "license": "MIT",
+  "workspaces": [
+    "packages/contracts",
+    "apps/regional-app",
+    "apps/edge-router",
+    "apps/worker",
+    "apps/console/server",
+    "apps/console/web"
+  ],
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:contracts": "npm run build -w @failover-sentry/contracts",
+    "typecheck": "npm run build:contracts && npm run typecheck --workspaces --if-present",
+    "lint": "npm run build:contracts && npm run lint --workspaces --if-present",
+    "test": "npm run build:contracts && npm run test --workspaces --if-present",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
+    "eslint": "^10.15.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "3.10.1",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.73.0",
+    "vitest": "^5.1.0"
+  }
+}

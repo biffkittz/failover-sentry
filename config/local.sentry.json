@@ -1,0 +1,39 @@
+{
+  "serviceName": "storefront",
+  "edgePublicUrl": "http://edge:8787",
+  "consoleUrl": "http://localhost:8080",
+  "initialPrimaryRegionId": "eastus2",
+  "regions": [
+    {
+      "id": "eastus2",
+      "displayName": "East US 2 (local)",
+      "provider": "local",
+      "baseUrl": "http://region-east:8080"
+    },
+    {
+      "id": "centralus",
+      "displayName": "Central US (local)",
+      "provider": "local",
+      "baseUrl": "http://region-central:8080"
+    }
+  ],
+  "health": {
+    "probeIntervalSeconds": 5,
+    "probeTimeoutMs": 3000,
+    "failureThreshold": 3,
+    "degradedLatencyMs": 1500,
+    "windowSize": 10,
+    "reportEveryProbes": 6
+  },
+  "failover": {
+    "autoFailoverEnabled": true,
+    "cooldownSeconds": 120,
+    "replicationTimeoutSeconds": 45,
+    "stallEscalationSeconds": 120,
+    "edgePropagationTimeoutSeconds": 60,
+    "stabilizationSeconds": 30,
+    "stabilizationProbeIntervalSeconds": 5,
+    "stabilizationFailureThreshold": 3,
+    "fenceComputeOnForcedFailover": true
+  }
+}

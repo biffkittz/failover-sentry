@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // The package runs in Node.js, Cloudflare Workers and browsers. It uses only Web APIs (WebCrypto, TextEncoder),
+    // which lib.dom declares, and no Node types, so the Vue app can type-check against the emitted declarations.
+    "lib": ["ES2024", "DOM"],
+    "types": []
+  },
+  "include": ["src"]
+}

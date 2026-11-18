@@ -1,0 +1,31 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.vite/
+.eslintcache
+
+# Playwright
+apps/console/web/test-results/
+apps/console/web/playwright-report/
+apps/console/web/blob-report/
+apps/console/web/playwright/.cache/
+
+# Local configuration and secrets. Real values live in Key Vault (Azure) or your shell (local).
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+.secrets/
+
+# Editors and OS
+.idea/
+.DS_Store
+*.swp
+
+# Terraform: see infra/.gitignore for the full list
+infra/.terraform/
+apps/console/web/node_modules/.tmp/
+scratch

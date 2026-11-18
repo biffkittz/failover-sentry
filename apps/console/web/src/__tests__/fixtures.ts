@@ -1,0 +1,133 @@
+import type { FailoverRun, RegionView, SentryStateView } from '@failover-sentry/contracts';
+import { FAILOVER_STEPS } from '@failover-sentry/contracts';
+
+export function region(id: string, overrides: Partial<RegionView> = {}): RegionView {
+  return {
+    config: {
+      id,
+      displayName: id === 'east' ? 'East US 2' : 'Central US',
+      provider: 'local',
+      baseUrl: `http://${id}`,
+    },
+    role: id === 'east' ? 'PRIMARY' : 'STANDBY',
+    compute: 'running',
+    recovery: null,
+    health: {
+      regionId: id,
+      status: 'HEALTHY',
+      consecutiveFailures: 0,
+      consecutiveSlow: 0,
+      windowSuccessRate: 1,
+      medianLatencyMs: 40,
+      probesInWindow: 10,
+      observedAt: new Date().toISOString(),
+      monitorInstanceId: `${id}-m`,
+      sequence: 3,
+      lastProbe: {
+        regionId: id,
+        at: new Date().toISOString(),
+        ok: true,
+        latencyMs: 42,
+        httpStatus: 200,
+        error: null,
+        reportedStatus: 'ok',
+        version: 'test',
+        chaos: null,
+        db: {
+          role: id === 'east' ? 'primary' : 'replica',
+          epoch: 3,
+          lsn: 120,
+          appliedLsn: 120,
+          lagSeconds: id === 'east' ? null : 0,
+          promotion: null,
+        },
+      },
+    },
+    ...overrides,
+  };
+}
+
+export function failoverRun(overrides: Partial<FailoverRun> = {}): FailoverRun {
+  return {
+    id: 'fo-7',
+    epoch: 4,
+    trigger: 'MANUAL',
+    mode: 'planned',
+    reason: 'drill',
+    requestedBy: 'octocat',
+    fromRegionId: 'east',
+    toRegionId: 'west',
+    startedAt: new Date(Date.now() - 30_000).toISOString(),
+    endedAt: null,
+    phase: 'AWAIT_REPLICATION',
+    outcome: null,
+    steps: FAILOVER_STEPS.map((name, index) => ({
+      name,
+      status: index < 4 ? 'SUCCEEDED' : index === 4 ? 'RUNNING' : 'PENDING',
+      startedAt: index <= 4 ? new Date(Date.now() - 20_000).toISOString() : null,
+      endedAt: index < 4 ? new Date(Date.now() - 10_000).toISOString() : null,
+      detail: index === 0 ? 'west answers in 40 ms' : null,
+    })),
+    replication: null,
+    stall: null,
+    stabilization: null,
+    compensations: [],
+    error: null,
+    abortRequestedBy: null,
+    ...overrides,
+  };
+}
+
+export function sentryState(overrides: Partial<SentryStateView> = {}): SentryStateView {
+  return {
+    workflowId: 'failover-sentry/storefront',
+    runId: 'run-1',
+    serviceName: 'storefront',
+    configVersion: 'abc',
+    mode: 'NORMAL',
+    epoch: 3,
+    activeRegionId: 'east',
+    autoFailoverEnabled: true,
+    autoFailoverSuspendedReason: null,
+    cooldownUntil: null,
+    regions: [region('east'), region('west')],
+    edge: {
+      mode: 'active',
+      activeRegionId: 'east',
+      epoch: 3,
+      version: 9,
+      failoverId: null,
+      updatedAt: new Date().toISOString(),
+    },
+    currentFailover: null,
+    recentFailovers: [],
+    alerts: [],
+    timeline: [],
+    health: {
+      probeIntervalSeconds: 30,
+      probeTimeoutMs: 5000,
+      failureThreshold: 3,
+      degradedLatencyMs: 1500,
+      windowSize: 10,
+      reportEveryProbes: 10,
+    },
+    failoverPolicy: {
+      autoFailoverEnabled: true,
+      cooldownSeconds: 600,
+      replicationTimeoutSeconds: 120,
+      stallEscalationSeconds: 600,
+      edgePropagationTimeoutSeconds: 180,
+      stabilizationSeconds: 90,
+      stabilizationProbeIntervalSeconds: 10,
+      stabilizationFailureThreshold: 3,
+      fenceComputeOnForcedFailover: true,
+    },
+    edgePublicUrl: 'https://dr.example.com',
+    startedAt: new Date().toISOString(),
+    runStartedAt: new Date().toISOString(),
+    continuedAsNewCount: 0,
+    historyLength: 100,
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}

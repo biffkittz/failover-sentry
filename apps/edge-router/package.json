@@ -1,0 +1,17 @@
+{
+  "name": "@failover-sentry/edge-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that routes the protected service to the active region, with epoch fencing. Plain JavaScript (checked by TypeScript) so Terraform can deploy src/worker.js without a build step.",
+  "type": "module",
+  "main": "src/worker.js",
+  "scripts": {
+    "start": "node src/local-server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@failover-sentry/contracts": "0.1.0"
+  }
+}

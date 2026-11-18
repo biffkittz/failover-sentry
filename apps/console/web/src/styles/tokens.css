@@ -1,0 +1,111 @@
+/*
+ * Design tokens. Components use only these custom properties, so light and dark themes (and any future theme) are a
+ * matter of redefining them. Colour pairs are chosen for WCAG AA contrast (4.5:1 for text).
+ */
+:root {
+  color-scheme: light;
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'Cascadia Code', Menlo, monospace;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  --color-bg: #f5f7fa;
+  --color-surface: #ffffff;
+  --color-surface-muted: #eef1f5;
+  --color-border: #d4dae3;
+  --color-text: #141b26;
+  --color-text-muted: #4a5568;
+  --color-primary: #2251cc;
+  --color-primary-hover: #1a40a3;
+  --color-on-primary: #ffffff;
+  --color-danger: #b42318;
+  --color-danger-hover: #8f1c13;
+  --color-on-danger: #ffffff;
+  --color-focus: #1d4ed8;
+
+  --color-healthy: #12703a;
+  --color-healthy-bg: #e3f3e8;
+  --color-degraded: #8a5100;
+  --color-degraded-bg: #fdf0db;
+  --color-unhealthy: #b42318;
+  --color-unhealthy-bg: #fde7e5;
+  --color-unknown: #4f5a6b;
+  --color-unknown-bg: #e9edf2;
+  --color-info: #1f4fb8;
+  --color-info-bg: #e5edfb;
+
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 10%);
+  --shadow-lg: 0 12px 32px rgb(16 24 40 / 18%);
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--color-focus) 45%, transparent);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --color-bg: #0f141b;
+  --color-surface: #161d27;
+  --color-surface-muted: #1d2532;
+  --color-border: #2c3747;
+  --color-text: #e8edf4;
+  --color-text-muted: #a7b2c3;
+  --color-primary: #7aa2ff;
+  --color-primary-hover: #a3bfff;
+  --color-on-primary: #0b1220;
+  --color-danger: #ff8a7f;
+  --color-danger-hover: #ffb0a8;
+  --color-on-danger: #1d0907;
+  --color-focus: #9ab8ff;
+  --color-healthy: #7ad69a;
+  --color-healthy-bg: #10301d;
+  --color-degraded: #f2bf6b;
+  --color-degraded-bg: #3a2a0d;
+  --color-unhealthy: #ff8a7f;
+  --color-unhealthy-bg: #3b1512;
+  --color-unknown: #b3bdcc;
+  --color-unknown-bg: #232c39;
+  --color-info: #9ab8ff;
+  --color-info-bg: #18264a;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+  --shadow-lg: 0 12px 32px rgb(0 0 0 / 55%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --color-bg: #0f141b;
+    --color-surface: #161d27;
+    --color-surface-muted: #1d2532;
+    --color-border: #2c3747;
+    --color-text: #e8edf4;
+    --color-text-muted: #a7b2c3;
+    --color-primary: #7aa2ff;
+    --color-primary-hover: #a3bfff;
+    --color-on-primary: #0b1220;
+    --color-danger: #ff8a7f;
+    --color-danger-hover: #ffb0a8;
+    --color-on-danger: #1d0907;
+    --color-focus: #9ab8ff;
+    --color-healthy: #7ad69a;
+    --color-healthy-bg: #10301d;
+    --color-degraded: #f2bf6b;
+    --color-degraded-bg: #3a2a0d;
+    --color-unhealthy: #ff8a7f;
+    --color-unhealthy-bg: #3b1512;
+    --color-unknown: #b3bdcc;
+    --color-unknown-bg: #232c39;
+    --color-info: #9ab8ff;
+    --color-info-bg: #18264a;
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+    --shadow-lg: 0 12px 32px rgb(0 0 0 / 55%);
+  }
+}

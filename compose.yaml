@@ -1,0 +1,104 @@
+# The whole system on one machine: a Temporal dev server, the worker, the console (dev sign-in), two "regions" of
+# the demo workload, and the edge router running the Cloudflare Worker's code on Node.js.
+#
+#   docker compose up --build        then open http://localhost:8080 (console) and http://localhost:8233 (Temporal UI)
+#
+# The secrets below are for local use only; Azure gets generated ones from Terraform (Key Vault).
+name: failover-sentry
+
+x-local-secrets:
+  region-admin: &region-admin local-region-admin-secret-0123456789
+  edge-admin: &edge-admin local-edge-admin-secret-0123456789
+  webhook: &webhook local-webhook-secret-0123456789
+
+x-temporal: &temporal
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: default
+
+services:
+  temporal:
+    image: temporalio/temporal:1.10.1@sha256:b228dadf9cdb6c7c02a1394b89dd76f827aac9760e458fce42f0899a10141225
+    command:
+      ['server', 'start-dev', '--ip', '0.0.0.0', '--db-filename', '/data/temporal.db', '--ui-port', '8233']
+    # The image runs as uid 1000, but a fresh named volume is owned by root: run as root so SQLite can create its
+    # file (local development only).
+    user: '0:0'
+    volumes:
+      - temporal-data:/data
+    ports:
+      - '7233:7233'
+      - '8233:8233'
+    healthcheck:
+      test: ['CMD', 'temporal', 'operator', 'cluster', 'health', '--address', '127.0.0.1:7233']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  region-east:
+    build: { context: ., dockerfile: apps/regional-app/Dockerfile }
+    environment:
+      REGION_ID: eastus2
+      REGION_NAME: East US 2 (local)
+      PEERS: centralus=http://region-central:8080
+      ADMIN_SHARED_SECRET: *region-admin
+      WEBHOOK_URL: http://console:8080/api/webhooks/replication
+      WEBHOOK_SECRET: *webhook
+    ports:
+      - '8091:8080'
+
+  region-central:
+    build: { context: ., dockerfile: apps/regional-app/Dockerfile }
+    environment:
+      REGION_ID: centralus
+      REGION_NAME: Central US (local)
+      PEERS: eastus2=http://region-east:8080
+      ADMIN_SHARED_SECRET: *region-admin
+      WEBHOOK_URL: http://console:8080/api/webhooks/replication
+      WEBHOOK_SECRET: *webhook
+    ports:
+      - '8092:8080'
+
+  edge:
+    build: { context: ., dockerfile: apps/edge-router/Dockerfile }
+    environment:
+      ORIGINS: '{"eastus2":"http://region-east:8080","centralus":"http://region-central:8080"}'
+      ADMIN_SECRET: *edge-admin
+      # Simulates Workers KV propagation, so the failover's "await edge propagation" step has something to wait for.
+      KV_VISIBILITY_DELAY_MS: '5000'
+    ports:
+      - '8787:8787'
+
+  worker:
+    build: { context: ., dockerfile: apps/worker/Dockerfile }
+    depends_on:
+      temporal: { condition: service_healthy }
+    environment:
+      <<: *temporal
+      SENTRY_CONFIG_FILE: /config/sentry.json
+      REGION_ADMIN_SECRET: *region-admin
+      EDGE_ADMIN_SECRET: *edge-admin
+      COMPUTE_PROVIDER: simulated
+      ALERT_PROVIDER: log
+    volumes:
+      - ./config/local.sentry.json:/config/sentry.json:ro
+
+  console:
+    build: { context: ., dockerfile: apps/console/Dockerfile }
+    depends_on:
+      temporal: { condition: service_healthy }
+    environment:
+      <<: *temporal
+      NODE_ENV: development
+      PUBLIC_URL: http://localhost:8080
+      AUTH_MODE: dev
+      SESSION_SECRET: local-session-secret-that-is-at-least-32-characters
+      SENTRY_CONFIG_FILE: /config/sentry.json
+      WEBHOOK_SIGNING_SECRET: *webhook
+      REGION_ADMIN_SECRET: *region-admin
+    volumes:
+      - ./config/local.sentry.json:/config/sentry.json:ro
+    ports:
+      - '8080:8080'
+
+volumes:
+  temporal-data:

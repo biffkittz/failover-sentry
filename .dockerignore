@@ -1,0 +1,18 @@
+# Build contexts are the repository root (npm workspaces), so keep them small and free of secrets.
+**/node_modules
+**/dist
+**/coverage
+**/.vite
+**/*.tsbuildinfo
+**/test-results
+**/playwright-report
+.git
+.github
+infra
+docs
+prompts
+**/.env
+**/.env.*
+**/*.pem
+**/*.pfx
+**/.secrets

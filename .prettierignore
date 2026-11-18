@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+package-lock.json
+infra/
+prompts
+apps/console/web/playwright-report/
+apps/console/web/test-results/
+*.md
