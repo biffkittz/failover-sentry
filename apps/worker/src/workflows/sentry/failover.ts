@@ -25,7 +25,7 @@ import type {
   StallState,
   StepStatus,
 } from '@failover-sentry/contracts';
-import { ApplicationFailure, condition, isCancellation, sleep } from '@temporalio/workflow';
+import { ApplicationFailure, condition, isCancellation, patched, sleep } from '@temporalio/workflow';
 import { compute, control, edgePropagation, quickCheck, verification } from '../activities.js';
 import { describeFailure, failureType } from '../errors.js';
 import { nowIso, type SentryState } from './state.js';
@@ -47,6 +47,18 @@ export interface FailoverHost {
   probeRegion(regionId: RegionId): Promise<ProbeResult>;
   probeEdge(): Promise<EdgeProbeResult>;
 }
+
+/**
+ * Patch: a planned failover needs a target that is replicating from the old primary (it catches up from it before
+ * switching roles). Histories recorded before it replay as they ran.
+ */
+export const PATCH_PLANNED_NEEDS_REPLICATING_TARGET = 'planned-needs-replicating-target';
+
+/**
+ * A target that hasn't heard from the primary for longer than this can't catch up with it: a planned failover would
+ * drain the edge and fence the primary, then fail. Regions poll their peers every second.
+ */
+const PLANNED_TARGET_CONTACT_LIMIT_SECONDS = 30;
 
 interface StepResult {
   detail: string;
@@ -146,11 +158,17 @@ export class FailoverExecution {
     }
 
     const notes: string[] = [];
+    // A planned failover catches the target up from the old primary, so the target must be in contact with it.
+    const notReplicating = patched(PATCH_PLANNED_NEEDS_REPLICATING_TARGET)
+      ? this.notReplicating(target)
+      : null;
     if (this.run.trigger === 'AUTOMATIC' && this.run.mode === 'forced') {
       // Like a "try planned before forced" policy: if the old primary's database still answers, sync first.
       try {
         const old = await quickCheck.getDatabaseStatus({ regionId: this.from });
-        if (old.role === 'primary') {
+        if (old.role === 'primary' && notReplicating) {
+          notes.push(`old primary's database answers, but ${this.to} ${notReplicating}: forced failover`);
+        } else if (old.role === 'primary') {
           this.run.mode = 'planned';
           notes.push(`old primary's database still answers: planned failover, no data loss`);
         }
@@ -161,8 +179,9 @@ export class FailoverExecution {
         notes.push(`old primary's database unreachable: forced failover`);
       }
     } else if (this.run.mode === 'planned') {
+      let old;
       try {
-        await quickCheck.getDatabaseStatus({ regionId: this.from });
+        old = await quickCheck.getDatabaseStatus({ regionId: this.from });
       } catch (error) {
         if (isCancellation(error)) {
           throw error;
@@ -170,6 +189,13 @@ export class FailoverExecution {
         throw ApplicationFailure.nonRetryable(
           `A planned failover needs the current primary's database, which is unreachable (${describeFailure(error)}); use a forced failover`,
           'PlannedNeedsPrimary',
+        );
+      }
+      // Only with a primary to catch up from (a failover to the freshest region has none, and needs none).
+      if (old.role === 'primary' && notReplicating) {
+        throw ApplicationFailure.nonRetryable(
+          `${this.to} ${notReplicating}, so it can't catch up with the primary for a planned failover; fix the connection between the regions, or use a forced failover`,
+          'TargetNotReplicating',
         );
       }
     }
@@ -182,6 +208,21 @@ export class FailoverExecution {
       ].join('; '),
       status: target.ok ? 'SUCCEEDED' : 'WARNING',
     };
+  }
+
+  /**
+   * Why the target isn't replicating from a primary (as reported by its own database, just now), or null when it
+   * is, or when its region is too old to say.
+   */
+  private notReplicating(target: ProbeResult): string | null {
+    const age = target.db?.primaryContactAgeSeconds;
+    if (age === undefined) {
+      return null;
+    }
+    if (age === null) {
+      return 'has not heard from a primary since it started';
+    }
+    return age > PLANNED_TARGET_CONTACT_LIMIT_SECONDS ? `has not heard from the primary for ${age}s` : null;
   }
 
   private async drainEdge(): Promise<StepResult> {

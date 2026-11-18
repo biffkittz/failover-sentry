@@ -40,7 +40,7 @@ existing_container_registry = {
 
 # Image tag to run (the tag pushed with `az acr build`). Leave it commented out for the first apply (no images exist
 # yet). Once set, keep it set: removing it again would delete the Container Apps.
-image_tag = "e1e15ab"
+image_tag = "9978d37"
 
 # Temporal Cloud namespace (created by hand). The API key comes from TF_VAR_temporal_api_key.
 temporal_namespace = "sentry.joqqs"

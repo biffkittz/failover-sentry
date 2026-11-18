@@ -109,10 +109,22 @@ touching history (e.g. "A failover is already in progress", "A planned failover 
 records the operator's GitHub login in the timeline. `triggerFailover` returns once the failover branch has taken over
 (normal operations stopped), with the failover ID and epoch; the console then follows it over the state stream.
 
+## The precheck
+
+`PRECHECK` runs before anything changes, so refusing there undoes nothing. It probes the target live and refuses
+a target that is unhealthy (unless an operator forces) or already primary. A **planned** failover also needs:
+
+- the old primary's database to answer the worker (`PlannedNeedsPrimary` otherwise), and
+- the target to be **replicating from it**: a planned promotion catches the target up from the old primary before
+  switching roles, so a target whose database hasn't heard from a primary for over 30 s
+  (`primaryContactAgeSeconds` in its health) would drain the edge, fence the primary, and then fail
+  (`TargetNotReplicating` otherwise). An automatic failover in that situation stays forced instead of trying
+  planned. Regions too old to report the field skip this check.
+
 ## Compensation (saga)
 
-`FailoverExecution` records which side effects it attempted (edge drained, old primary fenced, promotion requested,
-edge switched). `compensate` (non-cancellable) chooses:
+`FailoverExecution` derives which side effects it attempted (edge drained, old primary fenced, promotion requested,
+edge switched) from its steps' statuses. `compensate` (non-cancellable) chooses:
 
 | Old primary can serve? | Target promoted? | Action | Outcome |
 | --- | --- | --- | --- |
@@ -164,6 +176,7 @@ Patches in use (`sentry/sentry.ts`):
 | Patch ID | What it changed |
 | --- | --- |
 | `fresh-health-after-failover` | After a failover ends, decisions ignore health observed before it (no false split brain on the old primary's last "primary" report). |
+| `planned-needs-replicating-target` | The precheck refuses a planned failover to a target not in contact with the primary. |
 | `cancel-monitors-by-workflow-id` | Monitors are cancelled by workflow ID before the normal-operations scope, so one that continued as new still stops. |
 
 ## Testing
@@ -172,9 +185,9 @@ Patches in use (`sentry/sentry.ts`):
   reconciliation plans).
 - `apps/worker/test/adapters`: signed HTTP clients against local servers, fencing refusals, Cloudflare challenges,
   the email payload.
-- `apps/worker/test/workflows`: fifteen end-to-end scenarios against the Temporal CLI's dev server with a fake world
+- `apps/worker/test/workflows`: sixteen end-to-end scenarios against the Temporal CLI's dev server with a fake world
   (`test/helpers/fake-world.ts`): bootstrap, automatic failover with fencing, manual planned failover (and no false
-  split brain after it), a second failover refused while the first takes over, validator rejections, stall → abort,
+  split brain after it), a planned failover refused at the precheck when the target can't reach the primary, a second failover refused while the first takes over, validator rejections, stall → abort,
   stall → retry as forced, missing webhook, in-flight abort, stabilization anomaly → revert, duplicate/stale
   webhooks, split-brain fencing, suspended automatic failover. Two more run on a server that suggests continuing as
   new after 150 events: failing over once the monitors have continued as new, and a failover requested while the

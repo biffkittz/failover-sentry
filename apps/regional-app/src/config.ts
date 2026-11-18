@@ -49,6 +49,12 @@ const envSchema = z.object({
   PLANNED_SWITCH_DELAY_SECONDS: z.coerce.number().min(0).max(600).default(12),
   FORCED_SWITCH_DELAY_SECONDS: z.coerce.number().min(0).max(600).default(5),
   PLANNED_PEER_TIMEOUT_SECONDS: z.coerce.number().min(1).max(3_600).default(45),
+  /**
+   * How long one call to a peer's admin API may take. As long as the worker's own checks (8 s), so a primary that
+   * is slow but up can still be caught up with in a planned failover, instead of looking unreachable to the target
+   * while the sentry reaches it fine.
+   */
+  PEER_TIMEOUT_MS: z.coerce.number().int().min(500).max(60_000).default(8_000),
   TICK_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
   WRITES_PER_SECOND: z.coerce.number().min(0).max(10_000).default(4),
   REPLICATION_BATCH: z.coerce.number().int().min(1).max(1_000_000).default(40),

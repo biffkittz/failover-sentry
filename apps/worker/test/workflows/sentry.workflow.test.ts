@@ -228,6 +228,33 @@ describe('failoverSentryWorkflow', () => {
     });
   });
 
+  it("refuses a planned failover at the precheck when the target can't reach the primary", async () => {
+    const world = new FakeWorld(['east', 'west']);
+    await withSentry(world, {}, async ({ handle, waitFor, lastFailover }) => {
+      await waitFor('east established', established);
+      await waitFor(
+        'west observed healthy',
+        (state) => state.regions.find((region) => region.config.id === 'west')?.health?.status === 'HEALTHY',
+      );
+      // West answers the sentry, but its database hasn't heard from east for two minutes.
+      world.region('west').db.primaryContactAgeSeconds = 120;
+      const accepted = await handle.executeUpdate(triggerFailoverUpdate, {
+        args: [{ mode: 'planned', reason: 'drill', requestedBy: 'tester' }],
+      });
+      const done = await waitFor(
+        'failover refused',
+        (state) => lastFailover(state)?.id === accepted.failoverId,
+      );
+      const run = lastFailover(done);
+      expect(run?.steps.find((step) => step.name === 'PRECHECK')).toMatchObject({ status: 'FAILED' });
+      expect(run?.error).toContain('has not heard from the primary for 120s');
+      // Nothing was touched: east is still primary and still served.
+      expect(run?.steps.find((step) => step.name === 'DRAIN_EDGE')?.status).toBe('PENDING');
+      expect(world.region('east').db.role).toBe('primary');
+      expect(world.edge).toMatchObject({ mode: 'active', activeRegionId: 'east' });
+    });
+  });
+
   it('refuses a second failover while the first is still taking over from normal operations', async () => {
     const world = new FakeWorld(['east', 'west']);
     await withSentry(world, {}, async ({ handle, waitFor }) => {

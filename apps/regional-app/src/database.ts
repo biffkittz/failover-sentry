@@ -79,6 +79,10 @@ export class SimulatedDatabase {
       lsn: this.lsn,
       appliedLsn: this.appliedLsn,
       lagSeconds: this.lagSeconds(),
+      primaryContactAgeSeconds:
+        this.role === 'replica' && this.lastPrimaryContactAt !== null
+          ? Math.round((this.now() - this.lastPrimaryContactAt) / 100) / 10
+          : null,
       promotion: this.promotion ? this.publicPromotion(this.promotion) : null,
     };
   }

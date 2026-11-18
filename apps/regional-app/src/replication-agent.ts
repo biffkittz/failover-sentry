@@ -25,6 +25,8 @@ export class ReplicationAgent {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
   private readonly pendingWebhooks = new Set<Promise<boolean>>();
+  /** Peers whose last poll failed, with the error: logged when it changes, not on every tick. */
+  private readonly unreachablePeers = new Map<string, string>();
 
   constructor(
     private readonly db: SimulatedDatabase,
@@ -89,7 +91,27 @@ export class ReplicationAgent {
     const results = await Promise.allSettled(
       this.options.peers.map((peer) => this.peerClient.getStatus(peer)),
     );
-    return results.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
+    const reachable: PeerDatabaseStatus[] = [];
+    results.forEach((result, index) => {
+      const peer = this.options.peers[index];
+      if (!peer) {
+        return;
+      }
+      if (result.status === 'fulfilled') {
+        reachable.push(result.value);
+        if (this.unreachablePeers.delete(peer.regionId)) {
+          this.logger.info({ peer: peer.regionId }, 'peer reachable again');
+        }
+        return;
+      }
+      const reason = result.reason as Error;
+      const error = reason.name === 'TimeoutError' ? 'timed out' : reason.message;
+      if (this.unreachablePeers.get(peer.regionId) !== error) {
+        this.unreachablePeers.set(peer.regionId, error);
+        this.logger.warn({ peer: peer.regionId, err: error }, 'peer unreachable');
+      }
+    });
+    return reachable;
   }
 
   private async drivePromotion(reachable: PeerDatabaseStatus[]): Promise<void> {
@@ -135,8 +157,9 @@ export class ReplicationAgent {
     if (reachable.length === 0) {
       const age = this.db.promotionAgeMs() ?? 0;
       if (age > this.options.plannedPeerTimeoutMs) {
+        const errors = [...this.unreachablePeers].map(([peer, error]) => `${peer}: ${error}`).join('; ');
         const failed = this.db.failPromotion(
-          'planned promotion needs the current primary, which is unreachable; use a forced failover',
+          `planned promotion needs the current primary, which is unreachable${errors ? ` (${errors})` : ''}; use a forced failover`,
         );
         if (failed) {
           this.notify('replication.promotion.failed', failed.error);

@@ -27,7 +27,7 @@ const peerStatusSchema = z.object({
 export class HttpPeerClient implements PeerClient {
   constructor(
     private readonly secret: string,
-    private readonly timeoutMs = 2_000,
+    private readonly timeoutMs = 8_000,
   ) {}
 
   async getStatus(peer: Peer): Promise<PeerDatabaseStatus> {

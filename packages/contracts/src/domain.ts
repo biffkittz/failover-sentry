@@ -121,6 +121,12 @@ export interface DatabaseSnapshot {
   appliedLsn: number;
   /** Replica: seconds since it was last caught up with the primary; null when unknown or primary. */
   lagSeconds: number | null;
+  /**
+   * Replica: seconds since it last heard from a primary (null when it never has, or is primary). A planned
+   * failover needs this to be small: the target must be able to reach the old primary to catch up. Absent from
+   * regions running versions that predate it.
+   */
+  primaryContactAgeSeconds?: number | null;
   promotion: PromotionSnapshot | null;
 }
 

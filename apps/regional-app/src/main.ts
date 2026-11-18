@@ -35,7 +35,7 @@ const webhook =
 const agent = new ReplicationAgent(
   db,
   chaos,
-  new HttpPeerClient(config.ADMIN_SHARED_SECRET[0] ?? ''),
+  new HttpPeerClient(config.ADMIN_SHARED_SECRET[0] ?? '', config.PEER_TIMEOUT_MS),
   webhook,
   {
     regionId: config.REGION_ID,

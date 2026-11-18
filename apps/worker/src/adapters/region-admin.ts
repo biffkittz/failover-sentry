@@ -41,6 +41,8 @@ export const databaseSnapshotSchema = z.object({
   lsn: z.number().int().min(0),
   appliedLsn: z.number().int().min(0),
   lagSeconds: z.number().nullable(),
+  // Absent from regions running older versions: the planned-failover precheck then can't use it.
+  primaryContactAgeSeconds: z.number().min(0).nullable().optional(),
   promotion: promotionSchema.nullable(),
 });
 

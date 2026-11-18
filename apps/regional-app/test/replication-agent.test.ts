@@ -2,7 +2,7 @@ import type { DemoteRequest, ReplicationWebhookEvent } from '@failover-sentry/co
 import { describe, expect, it } from 'vitest';
 import { ChaosController } from '../src/chaos.js';
 import { SimulatedDatabase, type PeerDatabaseStatus } from '../src/database.js';
-import { silentLogger } from '../src/logger.js';
+import { silentLogger, type Logger } from '../src/logger.js';
 import type { Peer, PeerClient } from '../src/peer-client.js';
 import { ReplicationAgent } from '../src/replication-agent.js';
 import type { WebhookSender } from '../src/webhook-sender.js';
@@ -27,7 +27,7 @@ class FakePeer implements PeerClient {
   }
 }
 
-function setup() {
+function setup(logger: Logger = silentLogger) {
   const clock = { now: 0 };
   const db = new SimulatedDatabase(
     'east',
@@ -53,7 +53,7 @@ function setup() {
       plannedPeerTimeoutMs: 10_000,
       tickIntervalMs: 500,
     },
-    silentLogger,
+    logger,
   );
   const step = async (ms: number, times = 1) => {
     for (let index = 0; index < times; index += 1) {
@@ -124,6 +124,37 @@ describe('ReplicationAgent', () => {
     await step(5_000, 3);
     expect(db.snapshot().promotion).toMatchObject({ status: 'failed' });
     expect(sent[0]).toMatchObject({ type: 'replication.promotion.failed', failoverId: 'fo-5' });
+    // The reason reaches the sentry (and the operator), not just "unreachable".
+    expect(sent[0]?.error).toContain('west: unreachable');
+  });
+
+  it('logs a peer becoming unreachable once, and again when it is back', async () => {
+    const lines: string[] = [];
+    const logger: Logger = {
+      info: (fields, message) => lines.push(`info ${message} ${JSON.stringify(fields)}`),
+      warn: (fields, message) => lines.push(`warn ${message} ${JSON.stringify(fields)}`),
+      error: (fields, message) => lines.push(`error ${message} ${JSON.stringify(fields)}`),
+    };
+    const { peer, step } = setup(logger);
+    peer.reachable = false;
+    await step(500, 4);
+    peer.reachable = true;
+    await step(500, 2);
+    const peerLines = lines.filter((line) => line.includes('peer '));
+    expect(peerLines).toEqual([
+      'warn peer unreachable {"peer":"west","err":"unreachable"}',
+      'info peer reachable again {"peer":"west"}',
+    ]);
+  });
+
+  it('reports how long ago the replica last heard from a primary', async () => {
+    const { db, peer, step } = setup();
+    expect(db.snapshot().primaryContactAgeSeconds).toBeNull();
+    await step(500);
+    expect(db.snapshot().primaryContactAgeSeconds).toBe(0);
+    peer.reachable = false;
+    await step(500, 6);
+    expect(db.snapshot().primaryContactAgeSeconds).toBe(3);
   });
 
   it('does nothing while the region is down', async () => {
