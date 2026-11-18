@@ -17,6 +17,7 @@ Nothing deploys around Terraform.
 | --- | --- |
 | Tools | Terraform ≥ 1.17.1, Azure CLI, Node.js 26 (for local builds), optionally tflint and terraform-docs. |
 | Azure | `az login`; **Owner** (or Contributor + Role Based Access Control Administrator) on the subscription: Terraform creates role assignments and one custom role. Access to the state account `demonstration` (see `infra/backend.tf`). |
+| Container registry | Nothing to do by default (Terraform creates one). The demo environment instead sets `existing_container_registry` to login-app's `crloginappdemo7fyguj` (resource group `rg-loginapp-demo`): it must exist, and you need to be able to assign roles on it (Owner on the subscription covers it). |
 | Temporal Cloud | Create a namespace (e.g. `failover-sentry`), then an API key with access to it (a service account is best). Note the namespace ID (`failover-sentry.a1b2c`). The workers use the namespace endpoint `<namespace>.tmprl.cloud:7233` unless you set `temporal_address`. |
 | GitHub OAuth App | GitHub → Settings → Developer settings → OAuth Apps → New. Homepage `https://sentry.biffkittz.com`, callback `https://sentry.biffkittz.com/auth/github/callback`. Note the client ID; generate a client secret. |
 | Cloudflare API token | Account permissions: **Cloudflare Tunnel: Edit**, **Workers Scripts: Edit**, **Workers KV Storage: Edit**, **Account API Tokens: Edit** (only with alert emails). Zone permissions on `biffkittz.com`: **DNS: Edit**, **Workers Routes: Edit**, **Zone: Read**. Export it as `CLOUDFLARE_API_TOKEN`. |
@@ -39,8 +40,8 @@ terraform plan -var-file=environments/demo.tfvars -out=demo.tfplan
 terraform apply demo.tfplan
 ```
 
-This creates the resource groups, Log Analytics, the registry, Key Vault with generated secrets, the managed
-identities, the fencing role, the three Container Apps environments, the console's Cloudflare Tunnel and DNS record,
+This creates the resource groups, Log Analytics, the registry (or, with `existing_container_registry`, AcrPull
+grants on that one), Key Vault with generated secrets, the managed identities, the fencing role, the three Container Apps environments, the console's Cloudflare Tunnel and DNS record,
 and the edge router Worker (which serves a holding page until the regions exist). No Container App yet:
 `image_tag` is unset because no image exists.
 
@@ -100,13 +101,15 @@ terraform -chdir=infra destroy -var-file=environments/demo.tfvars
 ```
 
 Key Vault is purged on destroy (purge protection is off for this demo). Delete the Temporal Cloud namespace and the
-GitHub OAuth App by hand.
+GitHub OAuth App by hand. A shared registry stays, with the images in it; delete them with
+`az acr repository delete -n <registry> --repository failover-sentry/worker` (and `console`, `regional-app`).
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 | --- | --- |
 | `MANIFEST_UNKNOWN` on apply | The image tag isn't in the registry: `az acr repository show-tags -n <registry> --repository failover-sentry/worker`. |
+| Plan fails reading the registry (`ResourceNotFound`) | `existing_container_registry` names a registry that doesn't exist (any more): check the name and resource group, or whether its owner destroyed it. |
 | Console shows "Sentry not running" | The worker can't reach Temporal Cloud (check `TEMPORAL_ADDRESS`, the API key's namespace access) or the workflow was terminated: click **Start the sentry**. |
 | Replication always times out | The webhook doesn't arrive: check the console logs for `replication webhook relayed`; Bot Fight Mode (above); the regions' `WEBHOOK_SECRET` vs the console's `WEBHOOK_SIGNING_SECRET`. |
 | Fencing fails with 403 | The worker's role assignment hasn't propagated yet, or the custom role isn't assignable to the regional resource group. |

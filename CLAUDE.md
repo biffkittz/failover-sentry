@@ -42,6 +42,9 @@ docker compose up --build                               # the whole system local
   which chaos never touches; probing `/healthz` would let the platform "heal" chaos by restarting.
 - **Two-phase deploy.** Container Apps exist only when `image_tag` is set and the images are in ACR. Once set, keep it
   set, or the apps are destroyed.
+- **The registry is login-app's** (`crloginappdemo7fyguj` via `existing_container_registry` in `demo.tfvars`). This
+  configuration only reads it and grants AcrPull on it; login-app's Terraform owns it, so destroying that project
+  deletes these images and grants.
 - **Bot Fight Mode** on the zone can challenge the webhook and edge writes (docs/DEPLOYMENT.md).
 - **Secrets** live in Key Vault (per-secret RBAC) and, marked sensitive, in the remote state; never in tfvars, logs or
   `localStorage`.

@@ -4,7 +4,7 @@ Provisions the Failover Sentry and the cheap demo workload it protects:
 
 | Where | What | Approx. cost |
 | --- | --- | --- |
-| Azure, control region (`westus2`) | Resource group, Log Analytics (daily cap), Container Registry (Basic), Key Vault, three managed identities, a Container Apps environment with the **worker** and the **console** (with a `cloudflared` sidecar) | ACR ~$5/month; Container Apps consumption ~$5–15/month; Key Vault and logs cents |
+| Azure, control region (`westus2`) | Resource group, Log Analytics (daily cap), Container Registry (Basic; none with `existing_container_registry`, which the demo environment sets), Key Vault, three managed identities, a Container Apps environment with the **worker** and the **console** (with a `cloudflared` sidecar) | ACR ~$5/month (unless shared); Container Apps consumption ~$5–15/month; Key Vault and logs cents |
 | Azure, each protected region (`eastus2`, `centralus`) | Resource group, Container Apps environment, the **demo workload** (one replica, simulated database) | ~$2–5/month each (mostly idle) |
 | Cloudflare | Tunnel + proxied DNS for `sentry.biffkittz.com`; edge router Worker + KV + custom domain `dr.biffkittz.com`; an Email-Sending-only API token | Free plan limits |
 | Temporal Cloud | Your namespace (created by hand); the sentry uses roughly 0.3–0.5 M actions/month at the default 30 s probe interval | Usage-based |
@@ -21,7 +21,7 @@ Architecture, decisions and the deployment walkthrough: [`../docs/ARCHITECTURE.m
 | `main.tf` | Naming, tags, resource groups, identities, the fencing role, secrets, and the module wiring. |
 | `variables.tf` / `outputs.tf` | Inputs (with types, descriptions, validation) and outputs. |
 | `environments/demo.tfvars` | The demo environment's settings. Never secrets. |
-| `modules/registry` | Container Registry and AcrPull grants. |
+| `modules/registry` | Container Registry (created, or an existing one it only reads) and AcrPull grants. |
 | `modules/key-vault` | Key Vault (RBAC), secrets, per-secret read grants. |
 | `modules/container-app-environment` | A Consumption-only Container Apps environment (used 3×). |
 | `modules/container-app` | One Container App with sidecars, Key Vault references and probes (used 4×). |
@@ -43,11 +43,20 @@ terraform apply demo.tfplan
 
 Deployment is two-phase, because the Container Apps need images that only exist after the registry does:
 
-1. **Foundation** (`image_tag` unset): resource groups, registry, Key Vault and generated secrets, identities and
-   roles, Container Apps environments, the Cloudflare tunnel, edge router and DNS.
+1. **Foundation** (`image_tag` unset): resource groups, registry (or AcrPull grants on an existing one), Key Vault
+   and generated secrets, identities and roles, Container Apps environments, the Cloudflare tunnel, edge router and DNS.
 2. Build and push the three images with `az acr build` (`terraform output next_steps` prints the commands).
 3. **Apps**: set `image_tag`, `temporal_namespace`, `github_oauth_client_id`, `console_allowed_github_users`
    (and the secrets `TF_VAR_temporal_api_key`, `TF_VAR_github_oauth_client_secret`), then plan and apply again.
+
+### Sharing a registry with another project
+
+Set `existing_container_registry` to an existing registry's name and resource group (same subscription) and this
+configuration creates no registry: it reads that one and grants AcrPull on it to the sentry's identities. The demo
+environment uses login-app's `crloginappdemo7fyguj`; the images go under `failover-sentry/`, next to that project's.
+The other project keeps owning the registry, so destroying its infrastructure deletes these images and grants too
+(the next plan here then fails to read the registry). The registry sits in `centralus`, one of the protected regions;
+see the trade-off in [ARCHITECTURE.md](../docs/ARCHITECTURE.md#decisions-and-trade-offs).
 
 A second plan right after an apply must show no changes. Nothing here runs scripts at apply time, names are
 deterministic, and the only `ignore_changes` cover runtime state the sentry owns (the `dr-role`/`dr-epoch` tags it
@@ -132,13 +141,14 @@ Pre-commit (`../.pre-commit-config.yaml`) and CI (`../.github/workflows/ci.yml`)
 | <a name="input_cloudflared_image"></a> [cloudflared\_image](#input\_cloudflared\_image) | cloudflared image for the console's tunnel sidecar, pinned by digest. | `string` | `"cloudflare/cloudflared:2026.11.1@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d"` | no |
 | <a name="input_console_allowed_github_users"></a> [console\_allowed\_github\_users](#input\_console\_allowed\_github\_users) | GitHub logins allowed to sign in to the console (case-insensitive). Every allowed user is an operator. | `list(string)` | `[]` | no |
 | <a name="input_console_hostname"></a> [console\_hostname](#input\_console\_hostname) | Host name of the console (served through Cloudflare Tunnel). | `string` | `"sentry.biffkittz.com"` | no |
-| <a name="input_container_registry_sku"></a> [container\_registry\_sku](#input\_container\_registry\_sku) | Azure Container Registry SKU. | `string` | `"Basic"` | no |
+| <a name="input_container_registry_sku"></a> [container\_registry\_sku](#input\_container\_registry\_sku) | SKU of the registry this configuration creates. Ignored when existing\_container\_registry is set. | `string` | `"Basic"` | no |
 | <a name="input_container_sizes"></a> [container\_sizes](#input\_container\_sizes) | CPU (cores) and memory of each container. Container Apps accepts 0.25-core steps with twice the memory in GiB per core; the console's total includes its cloudflared sidecar (0.25 cores, 0.5Gi). | <pre>object({<br/>    worker_cpu      = optional(number, 0.5)<br/>    worker_memory   = optional(string, "1Gi")<br/>    console_cpu     = optional(number, 0.5)<br/>    console_memory  = optional(string, "1Gi")<br/>    regional_cpu    = optional(number, 0.25)<br/>    regional_memory = optional(string, "0.5Gi")<br/>  })</pre> | `{}` | no |
-| <a name="input_control_location"></a> [control\_location](#input\_control\_location) | Region of the sentry's control plane (worker, console, registry, Key Vault, logs). A third region, separate from the protected regions, so an outage in either of those doesn't take the sentry down with it. | `string` | `"westus2"` | no |
+| <a name="input_control_location"></a> [control\_location](#input\_control\_location) | Region of the sentry's control plane (worker, console, Key Vault, logs, and the registry unless an existing one is used). A third region, separate from the protected regions, so an outage in either of those doesn't take the sentry down with it. | `string` | `"westus2"` | no |
 | <a name="input_dns_zone_name"></a> [dns\_zone\_name](#input\_dns\_zone\_name) | Cloudflare zone that holds both host names. | `string` | `"biffkittz.com"` | no |
 | <a name="input_edge_hostname"></a> [edge\_hostname](#input\_edge\_hostname) | Host name of the protected demo service (the edge router Worker). A first-level subdomain, so the zone's Universal SSL certificate covers it. | `string` | `"dr.biffkittz.com"` | no |
 | <a name="input_edge_kv_cache_ttl_seconds"></a> [edge\_kv\_cache\_ttl\_seconds](#input\_edge\_kv\_cache\_ttl\_seconds) | Seconds a Cloudflare location may cache the edge routing (minimum 30). Bounds how long a routing change takes to propagate. | `number` | `30` | no |
 | <a name="input_environment"></a> [environment](#input\_environment) | Environment name used in resource names and tags. | `string` | `"demo"` | no |
+| <a name="input_existing_container_registry"></a> [existing\_container\_registry](#input\_existing\_container\_registry) | An existing Azure Container Registry to build the images into and pull them from, instead of creating one: its name and resource group, in the same subscription. It stays managed by its owner (another project's Terraform, say); this configuration only grants AcrPull on it to the sentry's identities, so whoever applies needs permission to assign roles on it. Null creates a registry in the control region. | <pre>object({<br/>    name                = string<br/>    resource_group_name = string<br/>  })</pre> | `null` | no |
 | <a name="input_failover_policy"></a> [failover\_policy](#input\_failover\_policy) | How the sentry fails over: automatic or not, cooldown, the replication webhook's durable timeout, stall escalation, edge propagation, stabilization, and whether a forced failover stops the old primary's compute. | <pre>object({<br/>    auto_failover_enabled                = optional(bool, true)<br/>    cooldown_seconds                     = optional(number, 600)<br/>    replication_timeout_seconds          = optional(number, 120)<br/>    stall_escalation_seconds             = optional(number, 600)<br/>    edge_propagation_timeout_seconds     = optional(number, 180)<br/>    stabilization_seconds                = optional(number, 90)<br/>    stabilization_probe_interval_seconds = optional(number, 10)<br/>    stabilization_failure_threshold      = optional(number, 3)<br/>    fence_compute_on_forced_failover     = optional(bool, true)<br/>  })</pre> | `{}` | no |
 | <a name="input_github_oauth_client_id"></a> [github\_oauth\_client\_id](#input\_github\_oauth\_client\_id) | Client ID of the console's GitHub OAuth App (callback URL https://<console\_hostname>/auth/github/callback). Required once image\_tag is set. | `string` | `null` | no |
 | <a name="input_github_oauth_client_secret"></a> [github\_oauth\_client\_secret](#input\_github\_oauth\_client\_secret) | Client secret of the console's GitHub OAuth App. Supply as TF\_VAR\_github\_oauth\_client\_secret; it goes to Key Vault. | `string` | `null` | no |
@@ -149,7 +159,7 @@ Pre-commit (`../.pre-commit-config.yaml`) and CI (`../.github/workflows/ci.yml`)
 | <a name="input_key_vault_additional_administrators"></a> [key\_vault\_additional\_administrators](#input\_key\_vault\_additional\_administrators) | Object IDs of other principals that run Terraform (a CI identity, say); they get Key Vault Secrets Officer too. | `list(string)` | `[]` | no |
 | <a name="input_log_analytics_daily_quota_gb"></a> [log\_analytics\_daily\_quota\_gb](#input\_log\_analytics\_daily\_quota\_gb) | Daily ingestion cap in GB, a cost guard (-1 for none). | `number` | `0.5` | no |
 | <a name="input_log_analytics_retention_days"></a> [log\_analytics\_retention\_days](#input\_log\_analytics\_retention\_days) | Days Log Analytics keeps logs (30 is included in the price). | `number` | `30` | no |
-| <a name="input_name_suffix"></a> [name\_suffix](#input\_name\_suffix) | Suffix that makes the registry and Key Vault names globally unique. Null derives a stable one from the subscription and name; never change it once deployed (it renames, and so replaces, both). | `string` | `null` | no |
+| <a name="input_name_suffix"></a> [name\_suffix](#input\_name\_suffix) | Suffix that makes the names of the Key Vault and of a created registry globally unique. Null derives a stable one from the subscription and name; never change it once deployed (it renames, and so replaces, both). | `string` | `null` | no |
 | <a name="input_project"></a> [project](#input\_project) | Short project name used in resource names and the required `project` tag. | `string` | `"fsentry"` | no |
 | <a name="input_rbac_propagation_wait"></a> [rbac\_propagation\_wait](#input\_rbac\_propagation\_wait) | Wait after creating role assignments before relying on them. | `string` | `"90s"` | no |
 | <a name="input_regions"></a> [regions](#input\_regions) | Regions of the protected workload, keyed by region ID (lower-case letters, digits, hyphens). Each gets its own resource group, Container Apps environment and copy of the demo workload. | <pre>map(object({<br/>    location     = string<br/>    display_name = string<br/>  }))</pre> | <pre>{<br/>  "centralus": {<br/>    "display_name": "Central US",<br/>    "location": "centralus"<br/>  },<br/>  "eastus2": {<br/>    "display_name": "East US 2",<br/>    "location": "eastus2"<br/>  }<br/>}</pre> | no |

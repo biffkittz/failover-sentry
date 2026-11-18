@@ -40,6 +40,13 @@ mock_resource "azurerm_container_registry" {
   }
 }
 
+mock_data "azurerm_container_registry" {
+  defaults = {
+    id           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-shared/providers/Microsoft.ContainerRegistry/registries/crshared"
+    login_server = "crshared.azurecr.io"
+  }
+}
+
 mock_resource "azurerm_role_assignment" {
   defaults = {
     id = "/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Authorization/roleAssignments/77777777-7777-7777-7777-777777777777"

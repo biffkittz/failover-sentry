@@ -1,5 +1,14 @@
+variable "existing" {
+  description = "An existing registry to use instead of creating one: its name and resource group, in the provider's subscription. Its owner keeps managing it; this module only grants AcrPull on it. Null creates a registry from name, location and sku."
+  type = object({
+    name                = string
+    resource_group_name = string
+  })
+  default = null
+}
+
 variable "name" {
-  description = "Globally unique registry name: 5-50 alphanumeric characters."
+  description = "Globally unique name of the registry to create: 5-50 alphanumeric characters. Unused with existing."
   type        = string
 
   validation {
@@ -9,17 +18,17 @@ variable "name" {
 }
 
 variable "location" {
-  description = "Azure region of the registry."
+  description = "Azure region of the registry to create. Unused with existing."
   type        = string
 }
 
 variable "resource_group_name" {
-  description = "Resource group that holds the registry."
+  description = "Resource group of the registry to create. Unused with existing."
   type        = string
 }
 
 variable "sku" {
-  description = "Registry SKU. Basic (about $5/month) has no network rules; Premium adds them and geo-replication."
+  description = "SKU of the registry to create. Basic (about $5/month) has no network rules; Premium adds them and geo-replication. Unused with existing."
   type        = string
   default     = "Basic"
 

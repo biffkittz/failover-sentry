@@ -1,16 +1,16 @@
 output "id" {
   description = "Resource ID of the registry."
-  value       = azurerm_container_registry.this.id
+  value       = local.registry.id
 }
 
 output "name" {
   description = "Name of the registry (for az acr commands)."
-  value       = azurerm_container_registry.this.name
+  value       = local.registry.name
 }
 
 output "login_server" {
   description = "Registry host name, e.g. crfsentrydemo1a2b3c.azurecr.io. Available once AcrPull assignments have propagated."
-  value       = azurerm_container_registry.this.login_server
+  value       = local.registry.login_server
 
   depends_on = [time_sleep.acr_pull_propagation]
 }

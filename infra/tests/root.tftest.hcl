@@ -124,6 +124,46 @@ run "deploys_all_apps_with_images_and_settings" {
   }
 }
 
+run "an_existing_registry_is_used_for_builds_and_pulls" {
+  command = apply
+
+  variables {
+    existing_container_registry = {
+      name                = "crshared"
+      resource_group_name = "rg-shared"
+    }
+    image_tag                    = "abc1234"
+    temporal_namespace           = "failover-sentry.a1b2c"
+    temporal_api_key             = "mock-temporal-api-key"
+    github_oauth_client_id       = "Ov23limockclientid"
+    github_oauth_client_secret   = "mock-github-secret"
+    console_allowed_github_users = ["octocat"]
+  }
+
+  assert {
+    condition     = output.container_registry_name == "crshared" && output.container_registry_login_server == "crshared.azurecr.io"
+    error_message = "The registry outputs must name the existing registry."
+  }
+
+  assert {
+    condition     = alltrue([for command in values(output.image_build_commands) : startswith(command, "az acr build --registry crshared ")])
+    error_message = "The images must be built into the existing registry."
+  }
+}
+
+run "rejects_a_malformed_existing_registry_name" {
+  command = plan
+
+  variables {
+    existing_container_registry = {
+      name                = "cr-not-valid"
+      resource_group_name = "rg-shared"
+    }
+  }
+
+  expect_failures = [var.existing_container_registry]
+}
+
 run "alert_emails_add_a_sending_token" {
   command = apply
 

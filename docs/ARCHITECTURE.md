@@ -38,8 +38,8 @@ flowchart LR
     console["Console\n(Fastify + Vue, cloudflared)"]
     worker["Worker\n(workflows + activities)"]
     kv[("Key Vault")]
-    acr[("Container Registry")]
   end
+  acr[("Container Registry\n(own, or shared)")]
   subgraph ra["Azure: eastus2"]
     appA["Demo workload\n+ simulated DB"]
   end
@@ -61,10 +61,12 @@ flowchart LR
 
 ## Deployment topology
 
-- **Three regions.** The control plane (worker, console, registry, Key Vault, logs) runs in `westus2`; the
-  workload runs in `eastus2` and `centralus` (an Azure paired-region pair). An outage of either workload region can't
+- **Three regions.** The control plane (worker, console, Key Vault, logs) runs in `westus2`; the workload runs in
+  `eastus2` and `centralus` (an Azure paired-region pair). An outage of either workload region can't
   take the sentry with it, and the sentry acts as a third-site witness: it fails over only when it sees the primary
   unhealthy *and* a standby healthy, so a sentry that loses its own connectivity does nothing.
+- **The registry** is created in `westus2` too, or an existing one is shared: the demo environment uses login-app's
+  (`centralus`).
 - **Temporal Cloud** holds the workflow state; the worker holds no state and can be replaced any time.
 - **No public origin for the console.** `cloudflared` dials out from the console's Container App; Cloudflare reaches
   the console only through the tunnel.
@@ -148,7 +150,7 @@ manual intervention (`MANUAL_INTERVENTION`, automatic failover suspended). See [
 
 ## Cost model
 
-Roughly **$15–35/month** in Azure at the defaults (registry ~$5, consumption Container Apps mostly idle, Key Vault
+Roughly **$15–35/month** in Azure at the defaults (registry ~$5, nothing when shared, consumption Container Apps mostly idle, Key Vault
 and logs pennies), Cloudflare free-plan features, and Temporal Cloud usage: each probe costs about two actions
 (local activity + timer), so two regions at a 30 s interval are ~0.35 M actions/month plus failovers. Lower the
 cost by raising `health_policy.probe_interval_seconds`; speed up detection by lowering it.
@@ -164,4 +166,5 @@ cost by raising `health_policy.probe_interval_seconds`; speed up detection by lo
 | Child workflow per region | Isolates each polling loop's history and failures; parent aggregates verdicts. | Polling in the parent (bloated history, one failure domain). |
 | Local activities for probes | Frequent, short, cheaper in history and actions. | Regular activities. |
 | Custom fencing role | Least privilege: read/start/stop only. | Built-in Container Apps Operator (also exec, log streams, every other action). |
+| Sharing login-app's registry (demo environment) | Saves its ~$5/month; a Basic registry holds both projects' images easily. The cost: it lives in `centralus`, a protected region, and Basic has no geo-replication, so during a real `centralus` outage nothing could pull images (a restarted worker or console, a fenced region coming back). Running apps keep running, and this demo's outages are simulated. | This project's own registry in the control region (the default without `existing_container_registry`), or Premium with geo-replication for real DR. |
 | Webhook + durable timeout + direct check | Webhooks get lost; a timeout alone would alert on every lost delivery. | Waiting on the webhook only, or polling only. |

@@ -35,7 +35,7 @@ variable "environment" {
 }
 
 variable "name_suffix" {
-  description = "Suffix that makes the registry and Key Vault names globally unique. Null derives a stable one from the subscription and name; never change it once deployed (it renames, and so replaces, both)."
+  description = "Suffix that makes the names of the Key Vault and of a created registry globally unique. Null derives a stable one from the subscription and name; never change it once deployed (it renames, and so replaces, both)."
   type        = string
   default     = null
 
@@ -46,7 +46,7 @@ variable "name_suffix" {
 }
 
 variable "control_location" {
-  description = "Region of the sentry's control plane (worker, console, registry, Key Vault, logs). A third region, separate from the protected regions, so an outage in either of those doesn't take the sentry down with it."
+  description = "Region of the sentry's control plane (worker, console, Key Vault, logs, and the registry unless an existing one is used). A third region, separate from the protected regions, so an outage in either of those doesn't take the sentry down with it."
   type        = string
   default     = "westus2"
 }
@@ -173,8 +173,22 @@ variable "cloudflared_image" {
   default     = "cloudflare/cloudflared:2026.11.1@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d"
 }
 
+variable "existing_container_registry" {
+  description = "An existing Azure Container Registry to build the images into and pull them from, instead of creating one: its name and resource group, in the same subscription. It stays managed by its owner (another project's Terraform, say); this configuration only grants AcrPull on it to the sentry's identities, so whoever applies needs permission to assign roles on it. Null creates a registry in the control region."
+  type = object({
+    name                = string
+    resource_group_name = string
+  })
+  default = null
+
+  validation {
+    condition     = var.existing_container_registry == null || can(regex("^[a-zA-Z0-9]{5,50}$", var.existing_container_registry.name))
+    error_message = "existing_container_registry.name must be a registry name: 5-50 letters and digits."
+  }
+}
+
 variable "container_registry_sku" {
-  description = "Azure Container Registry SKU."
+  description = "SKU of the registry this configuration creates. Ignored when existing_container_registry is set."
   type        = string
   default     = "Basic"
 }

@@ -10,8 +10,8 @@
 #     └ alert emails ───▶ Cloudflare Email Service
 #   regions ──signed replication webhook──▶ console's webhook gateway ──signal──▶ the sentry
 #
-# The control plane (worker, console, registry, Key Vault, logs) lives in a third region, so an outage in either
-# protected region can't take the sentry down with it. docs/ARCHITECTURE.md explains each decision.
+# The control plane (worker, console, Key Vault, logs) lives in a third region, so an outage in either protected
+# region can't take the sentry down with it. The registry is created there too, unless an existing one is used. docs/ARCHITECTURE.md explains each decision.
 
 data "azurerm_client_config" "current" {}
 
@@ -222,9 +222,12 @@ resource "azurerm_role_assignment" "worker_tags" {
 # Registry and secrets
 # ---------------------------------------------------------------------------------------------------------------------
 
+# Created in the control region, or an existing registry (existing_container_registry) that this configuration only
+# grants AcrPull on.
 module "registry" {
   source = "./modules/registry"
 
+  existing            = var.existing_container_registry
   name                = local.names.container_registry
   location            = azurerm_resource_group.control.location
   resource_group_name = azurerm_resource_group.control.name

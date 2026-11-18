@@ -31,6 +31,13 @@ dns_zone_name    = "biffkittz.com"
 console_hostname = "sentry.biffkittz.com"
 edge_hostname    = "dr.biffkittz.com"
 
+# Build the images into login-app's registry instead of creating one (about $5/month saved). login-app's Terraform
+# keeps managing it; this configuration only grants AcrPull on it. The images go under failover-sentry/.
+existing_container_registry = {
+  name                = "crloginappdemo7fyguj"
+  resource_group_name = "rg-loginapp-demo"
+}
+
 # Image tag to run (the tag pushed with `az acr build`). Leave it commented out for the first apply (no images exist
 # yet). Once set, keep it set: removing it again would delete the Container Apps.
 # image_tag = "0123abc"
