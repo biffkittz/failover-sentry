@@ -100,11 +100,13 @@ sequenceDiagram
   Note over S: success: roles swap, normal operations restart
 ```
 
-If any step fails, an operator aborts, or stabilization sees anomalies, the sentry **compensates** in a
+If the precheck refuses, nothing has changed (`REFUSED`; an automatic failover backs off briefly and tries again).
+If a later step fails, an operator aborts, or stabilization sees anomalies, the sentry **compensates** in a
 non-cancellable scope: if the old primary can serve it drains the edge, demotes the target, restores the old primary
 under a *new* epoch and routes back (`REVERTED` / `ABORTED`); if the old primary can't serve, reverting would make
 things worse, so it keeps the target if that is primary (`KEPT_TARGET`) or holds the maintenance page and requires
-manual intervention (`MANUAL_INTERVENTION`, automatic failover suspended). See [WORKFLOWS.md](WORKFLOWS.md).
+manual intervention (`MANUAL_INTERVENTION`, automatic failover suspended; the console can then recover the fenced
+old primary). See [WORKFLOWS.md](WORKFLOWS.md).
 
 ## How split brain is prevented
 

@@ -236,9 +236,34 @@ function disqualification(
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
+ * How long the sentry waits before trying again after an automatic failover was refused at its precheck: four probe
+ * intervals (long enough for the restarted monitors to observe both regions again), doubling with every further
+ * refusal in a row, and never longer than the cooldown. With the deployed defaults (30 s probes, a 10-minute
+ * cooldown): 2, 4 and 8 minutes, then 10. Null when nothing was refused.
+ *
+ * A refused failover moved nothing, so the cooldown (which exists to stop traffic from flapping) doesn't apply; but
+ * retrying at once would refuse again just as quickly when the target only looks healthy to its monitor (a flaky
+ * region), with alerts every time. Called by the sentry (SentryState's refusal count and time) for the decision
+ * and for the console's "cooling down until".
+ */
+export function refusalBackoffUntilMs(
+  refusals: number,
+  lastRefusalAtMs: number | null,
+  healthPolicy: HealthPolicy,
+  failoverPolicy: FailoverPolicy,
+): number | null {
+  if (refusals <= 0 || lastRefusalAtMs === null) {
+    return null;
+  }
+  const backoffMs = healthPolicy.probeIntervalSeconds * 4_000 * 2 ** Math.min(refusals - 1, 10);
+  return lastRefusalAtMs + Math.min(backoffMs, failoverPolicy.cooldownSeconds * 1000);
+}
+
+/**
  * What evaluateAutomaticFailover() (sentry.ts) should do:
  * - none: the primary is fine, or its UNHEALTHY verdict is stale. Nothing to do (and the report-once flags reset).
- * - cooldown: the primary is UNHEALTHY, but an automatic failover happened too recently. Recorded once.
+ * - cooldown: the primary is UNHEALTHY, but an automatic failover happened too recently, or the last one was refused
+ *   and its back-off hasn't passed. Recorded once; the sentry re-evaluates when `untilMs` comes.
  * - no-target: the primary is UNHEALTHY, but no standby qualifies. A critical alert, raised once.
  * - failover: start an automatic failover to targetRegionId (the sentry sets its pending trigger).
  */
@@ -263,9 +288,11 @@ export type AutomaticDecision =
  * 1. The active region's verdict must be UNHEALTHY and fresh. UNHEALTHY comes from the monitor's window
  *    (health.ts): `failureThreshold` consecutive failed probes. DEGRADED (slow, or some failures) is never enough:
  *    failing over has a cost (a brief outage, possibly lost transactions), so the sentry tolerates a limping primary.
- * 2. No automatic failover within `cooldownSeconds` of the last one. This prevents flapping: if the new primary
- *    also turns out to be unhealthy (a shared dependency is down, say), the sentry doesn't bounce traffic back and
- *    forth. Manual failovers don't start the cooldown and aren't subject to it.
+ * 2. No automatic failover within `cooldownSeconds` of the last one that got past its precheck. This prevents
+ *    flapping: if the new primary also turns out to be unhealthy (a shared dependency is down, say), the sentry
+ *    doesn't bounce traffic back and forth. Manual failovers don't start the cooldown and aren't subject to it.
+ *    After a refused automatic failover (nothing moved), the shorter back-off of refusalBackoffUntilMs applies
+ *    instead (`refusalBackoffUntilMs` in the context).
  * 3. A standby must qualify (chooseFailoverTarget, HEALTHY only).
  *
  * The decision proposes the most conservative mode, forced (it doesn't count on the old primary). The failover's
@@ -273,7 +300,10 @@ export type AutomaticDecision =
  * from it, it upgrades to planned, which loses nothing.
  */
 export function decideAutomaticFailover(
-  context: DecisionContext & { lastAutomaticFailoverAtMs: number | null },
+  context: DecisionContext & {
+    lastAutomaticFailoverAtMs: number | null;
+    refusalBackoffUntilMs?: number | null;
+  },
 ): AutomaticDecision {
   const active = context.regions.find((region) => region.id === context.activeRegionId);
   const health = active?.health;
@@ -292,6 +322,15 @@ export function decideAutomaticFailover(
       kind: 'cooldown',
       untilMs,
       reason: `automatic failover is cooling down until ${new Date(untilMs).toISOString()}`,
+    };
+  }
+  // Rule 2, after a refusal: the back-off.
+  const backoffUntilMs = context.refusalBackoffUntilMs ?? null;
+  if (backoffUntilMs !== null && context.nowMs < backoffUntilMs) {
+    return {
+      kind: 'cooldown',
+      untilMs: backoffUntilMs,
+      reason: `the last automatic failover was refused at its precheck; trying again after ${new Date(backoffUntilMs).toISOString()}`,
     };
   }
   // Rule 3. "No target" is also the witness property at work: if every region looks unhealthy to the sentry, the

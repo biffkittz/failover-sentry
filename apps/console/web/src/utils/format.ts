@@ -35,6 +35,7 @@ export function phaseLabel(phase: FailoverPhase): string {
 
 export const OUTCOME_LABELS: Record<FailoverOutcome, string> = {
   SUCCEEDED: 'Succeeded',
+  REFUSED: 'Refused',
   REVERTED: 'Reverted',
   ABORTED: 'Aborted',
   KEPT_TARGET: 'Kept target',

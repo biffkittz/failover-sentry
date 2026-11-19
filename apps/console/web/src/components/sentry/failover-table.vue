@@ -15,6 +15,7 @@ function tone(run: FailoverRun): BadgeTone {
       return 'info';
     case 'SUCCEEDED':
       return 'healthy';
+    case 'REFUSED':
     case 'ABORTED':
     case 'KEPT_TARGET':
       return 'degraded';

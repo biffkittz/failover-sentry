@@ -19,7 +19,7 @@ async function recover(regionId: string): Promise<void> {
     await sentry.recoverRegion(regionId);
     notifications.info(
       'Recovery started',
-      `The sentry is starting ${regionId} and will wait for it to rejoin as a standby.`,
+      `The sentry is starting ${regionId} and will wait for it to answer as a healthy replica.`,
     );
   } catch (error) {
     notifications.error(`Could not recover ${regionId}`, (error as Error).message);
@@ -32,6 +32,7 @@ async function recover(regionId: string): Promise<void> {
     :region="region"
     :probes="probes"
     :recovering="sentry.isPending(`recover:${region.config.id}`)"
+    :manual-intervention="sentry.state?.mode === 'MANUAL_INTERVENTION_REQUIRED'"
     @recover="recover"
   />
 </template>

@@ -246,12 +246,14 @@ export type FailoverPhase = FailoverStepName | 'AWAITING_OPERATOR' | 'COMPENSATI
 
 /**
  * - SUCCEEDED: traffic and the primary database moved to the target.
+ * - REFUSED: the precheck refused the failover before anything changed (the target failed its live check, say).
  * - REVERTED: something went wrong (or anomalies appeared) and the sentry moved everything back.
  * - ABORTED: an operator aborted and the sentry moved everything back.
  * - KEPT_TARGET: reverting was impossible (the old primary is down), so the sentry kept the target and alerted.
  * - MANUAL_INTERVENTION: neither side could serve; the edge shows the maintenance page and humans must step in.
  */
-export type FailoverOutcome = 'SUCCEEDED' | 'REVERTED' | 'ABORTED' | 'KEPT_TARGET' | 'MANUAL_INTERVENTION';
+export type FailoverOutcome =
+  'SUCCEEDED' | 'REFUSED' | 'REVERTED' | 'ABORTED' | 'KEPT_TARGET' | 'MANUAL_INTERVENTION';
 
 export interface CompensationRecord {
   action: string;
@@ -319,6 +321,7 @@ export type AlertSeverity = 'info' | 'warning' | 'critical';
 export type AlertKind =
   | 'FAILOVER_STARTED'
   | 'FAILOVER_COMPLETED'
+  | 'FAILOVER_REFUSED'
   | 'FAILOVER_REVERTED'
   | 'FAILOVER_ABORTED'
   | 'REPLICATION_STALLED'

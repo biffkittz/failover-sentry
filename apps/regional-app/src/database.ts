@@ -253,11 +253,17 @@ export class SimulatedDatabase {
     return this.appliedLsn >= primaryLsn;
   }
 
-  /** Catch up with a peer that is no longer primary (the fenced old primary of a planned failover). */
+  /**
+   * Catch up with a peer that is no longer primary (the fenced old primary of a planned failover). Never moves
+   * backwards: a peer behind this node (the old primary came back empty, and the sentry is failing over to the region
+   * that still holds the data) has nothing to give, and this node already has everything.
+   */
   catchUpWith(peerLsn: number): void {
-    const batch = Math.max(1, this.options.replicationBatch);
-    this.appliedLsn = Math.min(peerLsn, this.appliedLsn + batch);
-    this.lsn = Math.max(this.lsn, peerLsn);
+    if (this.appliedLsn < peerLsn) {
+      const batch = Math.max(1, this.options.replicationBatch);
+      this.appliedLsn = Math.min(peerLsn, this.appliedLsn + batch);
+      this.lsn = Math.max(this.lsn, peerLsn);
+    }
     if (this.appliedLsn >= peerLsn) {
       this.lastCaughtUpAt = this.now();
     }

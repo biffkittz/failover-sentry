@@ -13,16 +13,20 @@ const props = defineProps<{
   region: RegionView;
   probes: ProbeResult[] | undefined;
   recovering?: boolean;
+  /** The sentry is in MANUAL_INTERVENTION_REQUIRED mode. */
+  manualIntervention?: boolean;
 }>();
 defineEmits<{ recover: [regionId: string] }>();
 
 const health = computed(() => props.region.health);
 const db = computed(() => health.value?.lastProbe?.db ?? null);
 const lastProbe = computed(() => health.value?.lastProbe ?? null);
-const canRecover = computed(
-  () =>
-    props.region.role === 'STANDBY' &&
-    (props.region.compute === 'stopped' || health.value?.status === 'UNHEALTHY'),
+// The same rule as the sentry's validator: a standby that is stopped or unhealthy, or a primary that a failover
+// fenced (stopped) before it failed and left the sentry needing manual intervention.
+const canRecover = computed(() =>
+  props.region.role === 'STANDBY'
+    ? props.region.compute === 'stopped' || health.value?.status === 'UNHEALTHY'
+    : Boolean(props.manualIntervention) && props.region.compute === 'stopped',
 );
 const recovery = computed(() => props.region.recovery);
 </script>

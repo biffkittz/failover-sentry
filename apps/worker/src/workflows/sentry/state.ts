@@ -68,6 +68,13 @@ export class SentryState {
    * before the failover. Null when no failover has ended (or the run predates the patch that sets it).
    */
   healthValidSince: string | null;
+  /**
+   * Automatic failovers refused at their precheck in a row (nothing moved), and when the last one was. They set the
+   * back-off before the next automatic attempt (domain/decisions.ts refusalBackoffUntilMs). Reset when the primary
+   * reports HEALTHY again, or when a failover gets past its precheck.
+   */
+  automaticRefusals: number;
+  lastAutomaticRefusalAt: string | null;
 
   constructor(input: SentryWorkflowInput) {
     const carried = input.carried;
@@ -90,6 +97,8 @@ export class SentryState {
     this.processedEventIds = carried?.processedEventIds ?? [];
     this.sequence = carried?.sequence ?? 0;
     this.healthValidSince = carried?.healthValidSince ?? null;
+    this.automaticRefusals = carried?.automaticRefusals ?? 0;
+    this.lastAutomaticRefusalAt = carried?.lastAutomaticRefusalAt ?? null;
     for (const [regionId, snapshot] of Object.entries(carried?.regionHealth ?? {})) {
       this.regionHealth.set(regionId, snapshot);
     }
@@ -301,6 +310,8 @@ export class SentryState {
       processedEventIds: this.processedEventIds,
       sequence: this.sequence,
       healthValidSince: this.healthValidSince,
+      automaticRefusals: this.automaticRefusals,
+      lastAutomaticRefusalAt: this.lastAutomaticRefusalAt,
     };
   }
 }

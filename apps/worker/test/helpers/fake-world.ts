@@ -10,6 +10,7 @@ import type {
   ProbeResult,
   ReplicationWebhookEvent,
 } from '@failover-sentry/contracts';
+import { activityInfo } from '@temporalio/activity';
 import { ApplicationFailure } from '@temporalio/common';
 import type { SentryActivities } from '../../src/activities/index.js';
 
@@ -21,6 +22,11 @@ export class FakeRegion {
   adminUp: boolean | null = null;
   computeStopped = false;
   latencyMs = 20;
+  /**
+   * The sentry's own live probes (the failover's precheck) fail while the region's monitor still sees it healthy: a
+   * flaky region, or one that only looks healthy from where its monitor stands.
+   */
+  liveCheckFails = false;
   promotionBehaviour: PromotionBehaviour = 'complete';
   db: DatabaseSnapshot = {
     role: 'replica',
@@ -116,13 +122,23 @@ export class FakeWorld {
         error: failed ? 'simulated failure' : null,
       };
       this.webhooks.push(event);
-      void this.webhookSink?.(event);
+      // The sentry may be gone by now (the test cancelled or terminated it): a webhook nobody receives is no error,
+      // and an unhandled rejection would fail the whole test run.
+      void this.webhookSink?.(event).catch(() => undefined);
     }, this.promotionDelayMs);
   }
 
   activities(): SentryActivities {
     return {
-      probeRegion: async ({ regionId }) => this.probeOf(this.region(regionId)),
+      probeRegion: async ({ regionId }) => {
+        const region = this.region(regionId);
+        const probe = this.probeOf(region);
+        // The sentry probes live only in its failovers (precheck, compensation); monitors probe from their own workflow.
+        if (region.liveCheckFails && activityInfo().workflowType === 'failoverSentryWorkflow') {
+          return { ...probe, ok: false, httpStatus: 503, error: 'HTTP 503 (live check)', db: null };
+        }
+        return probe;
+      },
 
       probeEdge: async (): Promise<EdgeProbeResult> => {
         const routing = this.edge;

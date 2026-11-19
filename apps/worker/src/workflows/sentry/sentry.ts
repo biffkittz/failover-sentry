@@ -92,7 +92,12 @@ import {
   WorkflowIdReusePolicy,
 } from '@temporalio/workflow';
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/common';
-import { decideAutomaticFailover, planReconciliation, type ReconcileAction } from '../../domain/decisions.js';
+import {
+  decideAutomaticFailover,
+  planReconciliation,
+  refusalBackoffUntilMs,
+  type ReconcileAction,
+} from '../../domain/decisions.js';
 import { alerts, control, probeActivities, verification } from '../activities.js';
 import { describeFailure } from '../errors.js';
 import { monitorRegionChild } from '../monitor-region.js';
@@ -133,6 +138,13 @@ export const PATCH_CANCEL_MONITORS_BY_ID = 'cancel-monitors-by-workflow-id';
 export const PATCH_STOP_MONITORS_ON_CANCEL = 'stop-monitors-on-cancel';
 
 /**
+ * Patch: the cooldown starts only once an automatic failover gets past its precheck, a refused one backs off instead
+ * (refusalBackoffUntilMs, domain/decisions.ts), and a timer re-evaluates when either ends (recheckWhenHoldOffEnds).
+ * Histories recorded before started the cooldown with every automatic failover and set no timer.
+ */
+export const PATCH_REFUSED_FAILOVER_BACKOFF = 'refused-failover-backoff';
+
+/**
  * One instance per workflow run. It implements FailoverHost, the small interface FailoverExecution (failover.ts)
  * and recoverRegion (recovery.ts) use to reach back into the sentry: its state, alerts, edge writes and probes.
  */
@@ -159,6 +171,8 @@ export class Sentry implements FailoverHost {
   private readonly startedMonitors = new Set<RegionId>();
   /** The last failover to finish, so onTriggerFailover() can answer even if its failover ended very quickly. */
   private lastFinishedFailoverId: string | null = null;
+  /** When the timer armed by recheckWhenHoldOffEnds() fires (the end of a cooldown or back-off), or null. */
+  private holdOffRecheckAtMs: number | null = null;
   /** Report-once flags: each condition is recorded or alerted once, not on every health report. */
   private noTargetAlerted = false;
   private cooldownNoted = false;
@@ -614,7 +628,9 @@ export class Sentry implements FailoverHost {
    *
    * - On success, the target becomes the active region.
    * - On any failure or abort, it compensates in a non-cancellable scope (cleanup must finish even though the
-   *   failover's scope was cancelled) and reports the outcome with reportOutcome().
+   *   failover's scope was cancelled) and reports the outcome with reportOutcome(). A failover the precheck refused
+   *   changed nothing: its outcome is REFUSED.
+   * - An automatic failover then holds off the next one (holdOffAfter): the cooldown, or a back-off after a refusal.
    *
    * Either way the finally block archives the run, returns to NORMAL mode, and sets healthValidSince, so that later
    * decisions ignore health observed under the old roles (patched: histories from before replay without it).
@@ -627,10 +643,13 @@ export class Sentry implements FailoverHost {
     state.currentFailover = run;
     state.mode = 'FAILING_OVER';
     this.pendingTrigger = null; // currentFailover guards from here on.
-    if (trigger.kind === 'AUTOMATIC') {
+    const automatic = trigger.kind === 'AUTOMATIC';
+    // Patched: what holds off the next automatic failover depends on this one's outcome (holdOffAfter). Histories
+    // recorded before started the cooldown here, refused or not.
+    const holdOffByOutcome = automatic && patched(PATCH_REFUSED_FAILOVER_BACKOFF);
+    if (automatic && !holdOffByOutcome) {
       state.lastAutomaticFailoverAt = nowIso();
     }
-    const automatic = trigger.kind === 'AUTOMATIC';
     this.raiseAlert(
       'FAILOVER_STARTED',
       automatic ? 'critical' : 'warning',
@@ -646,6 +665,9 @@ export class Sentry implements FailoverHost {
       await scope.run(() => execution.execute());
       run.outcome = 'SUCCEEDED';
       state.activeRegionId = run.toRegionId;
+      if (holdOffByOutcome) {
+        this.holdOffAfter(run);
+      }
       this.raiseAlert(
         'FAILOVER_COMPLETED',
         automatic ? 'warning' : 'info',
@@ -657,6 +679,9 @@ export class Sentry implements FailoverHost {
       run.error = describeFailure(error);
       // Cleanup must finish even though the failover scope may have been cancelled.
       run.outcome = await CancellationScope.nonCancellable(() => execution.compensate(error));
+      if (holdOffByOutcome) {
+        this.holdOffAfter(run); // Before the alert, which says when automatic failover tries again.
+      }
       this.reportOutcome(run);
     } finally {
       this.failoverScope = null;
@@ -674,8 +699,26 @@ export class Sentry implements FailoverHost {
       if (state.mode === 'FAILING_OVER') {
         state.mode = 'NORMAL';
       }
+      if (run.outcome !== 'REFUSED') {
+        state.automaticRefusals = 0; // Something moved, or an operator stepped in: refusals no longer run in a row.
+      }
       this.noTargetAlerted = false;
       this.cooldownNoted = false;
+    }
+  }
+
+  /**
+   * Starts what holds off the next automatic failover once an automatic failover's outcome is known; called by
+   * runFailover() under PATCH_REFUSED_FAILOVER_BACKOFF. A refusal (the precheck said no and nothing moved) counts
+   * towards the back-off (refusalBackoffUntilMs); any other outcome starts the cooldown, from when the failover
+   * started. That includes an operator's abort during the precheck: retrying at once would undo their decision.
+   */
+  private holdOffAfter(run: FailoverRun): void {
+    if (run.outcome === 'REFUSED') {
+      this.state.automaticRefusals += 1;
+      this.state.lastAutomaticRefusalAt = nowIso();
+    } else {
+      this.state.lastAutomaticFailoverAt = run.startedAt;
     }
   }
 
@@ -688,6 +731,22 @@ export class Sentry implements FailoverHost {
     const state = this.state;
     const options = { failoverId: run.id };
     switch (run.outcome) {
+      case 'REFUSED': {
+        // Not an incident in itself: nothing moved. The precheck's reason says what to do about it.
+        const retryAtMs = run.trigger === 'AUTOMATIC' ? this.backoffUntilMs() : null;
+        const retry =
+          retryAtMs === null
+            ? ''
+            : ` Automatic failover tries again after ${new Date(retryAtMs).toISOString()} if the primary is still unhealthy; a manual failover can go ahead now.`;
+        this.raiseAlert(
+          'FAILOVER_REFUSED',
+          'warning',
+          `Failover ${run.id} refused`,
+          `${run.error ?? 'The precheck refused the failover'}. Nothing was changed: ${run.fromRegionId} remains primary.${retry}`,
+          options,
+        );
+        break;
+      }
       case 'ABORTED':
         this.raiseAlert(
           'FAILOVER_ABORTED',
@@ -891,6 +950,11 @@ export class Sentry implements FailoverHost {
     if (snapshot.lastProbe?.ok && this.state.regionCompute.get(snapshot.regionId) === 'unknown') {
       this.state.regionCompute.set(snapshot.regionId, 'running'); // It answers, so its compute runs.
     }
+    if (snapshot.regionId === this.state.activeRegionId && snapshot.status === 'HEALTHY') {
+      // The primary recovered: refused failovers no longer run in a row, and a later outage starts with the
+      // shortest back-off.
+      this.state.automaticRefusals = 0;
+    }
     const name = this.state.displayName(snapshot.regionId);
     if (
       report.reason === 'STATUS_CHANGED' ||
@@ -918,7 +982,8 @@ export class Sentry implements FailoverHost {
    *
    * The decision itself is the pure decideAutomaticFailover() (domain/decisions.ts). A failover decision sets
    * pendingTrigger, which ends normal operations. Cooldown and "no healthy target" are reported once, until the
-   * primary recovers (decision 'none' resets the flags) or a failover ends.
+   * primary recovers (decision 'none' resets the flags) or a failover ends. A cooldown (or back-off) also arms a
+   * timer that evaluates again when it ends (recheckWhenHoldOffEnds).
    */
   private evaluateAutomaticFailover(): void {
     if (
@@ -933,6 +998,7 @@ export class Sentry implements FailoverHost {
     const decision = decideAutomaticFailover({
       ...this.state.decisionContext(),
       lastAutomaticFailoverAtMs: lastAutomatic ? Date.parse(lastAutomatic) : null,
+      refusalBackoffUntilMs: this.backoffUntilMs(),
     });
     switch (decision.kind) {
       case 'none':
@@ -946,6 +1012,7 @@ export class Sentry implements FailoverHost {
             severity: 'warning',
           });
         }
+        this.recheckWhenHoldOffEnds(decision.untilMs);
         return;
       case 'no-target':
         if (!this.noTargetAlerted) {
@@ -1220,17 +1287,51 @@ export class Sentry implements FailoverHost {
   // -------------------------------------------------------------------------------------------------------------
 
   /**
-   * When the cooldown after the last automatic failover ends, or null when none is in force. Only for the console:
-   * the query handler includes it in the state view. The decision itself checks the cooldown in
-   * decideAutomaticFailover().
+   * When the cooldown after the last automatic failover (or the back-off after a refused one) ends, or null when
+   * neither is in force. Only for the console: the query handler includes it in the state view. The decision itself
+   * checks both in decideAutomaticFailover().
    */
   private cooldownUntil(): string | null {
     const last = this.state.lastAutomaticFailoverAt;
-    if (!last) {
-      return null;
-    }
-    const until = Date.parse(last) + this.state.config.failover.cooldownSeconds * 1000;
+    const cooldownEndMs = last ? Date.parse(last) + this.state.config.failover.cooldownSeconds * 1000 : 0;
+    const until = Math.max(cooldownEndMs, this.backoffUntilMs() ?? 0);
     return until > Date.now() ? new Date(until).toISOString() : null;
+  }
+
+  /** When the back-off after refused automatic failovers ends (refusalBackoffUntilMs), or null when none applies. */
+  private backoffUntilMs(): number | null {
+    const last = this.state.lastAutomaticRefusalAt;
+    return refusalBackoffUntilMs(
+      this.state.automaticRefusals,
+      last ? Date.parse(last) : null,
+      this.state.config.health,
+      this.state.config.failover,
+    );
+  }
+
+  /**
+   * Arms a timer that re-evaluates an automatic failover when a cooldown or back-off ends; called by
+   * evaluateAutomaticFailover() on a 'cooldown' decision. Without it the next evaluation waits for a health report,
+   * which, while nothing changes, comes only every `reportEveryProbes` probes (5 minutes deployed).
+   *
+   * One timer per end time. A plain timer rather than a background task, so continue-as-new doesn't wait for it (the
+   * next run arms its own on its first evaluation); it is cancelled only with the sentry itself. Patched: histories
+   * recorded before set no timer.
+   */
+  private recheckWhenHoldOffEnds(untilMs: number): void {
+    if (this.holdOffRecheckAtMs === untilMs || !patched(PATCH_REFUSED_FAILOVER_BACKOFF)) {
+      return;
+    }
+    this.holdOffRecheckAtMs = untilMs;
+    void sleep(Math.max(1, untilMs - Date.now())).then(
+      () => {
+        if (this.holdOffRecheckAtMs === untilMs) {
+          this.holdOffRecheckAtMs = null;
+        }
+        this.evaluateAutomaticFailover();
+      },
+      () => undefined, // Cancelled with the sentry: nothing to evaluate.
+    );
   }
 
   /**

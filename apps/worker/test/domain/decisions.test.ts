@@ -3,6 +3,7 @@ import {
   chooseFailoverTarget,
   decideAutomaticFailover,
   planReconciliation,
+  refusalBackoffUntilMs,
   stalenessLimitMs,
   type DecisionContext,
   type RegionFacts,
@@ -76,6 +77,24 @@ describe('decideAutomaticFailover', () => {
       lastAutomaticFailoverAtMs: NOW - 10_000,
     });
     expect(decision).toMatchObject({ kind: 'cooldown', untilMs: NOW + 50_000 });
+  });
+
+  it('backs off after a refused failover, and fails over once the back-off has passed', () => {
+    const regions = [region('east', snapshot('east', 'UNHEALTHY')), healthyStandby];
+    const backingOff = decideAutomaticFailover({
+      ...context(regions),
+      lastAutomaticFailoverAtMs: null,
+      refusalBackoffUntilMs: NOW + 1_000,
+    });
+    expect(backingOff).toMatchObject({ kind: 'cooldown', untilMs: NOW + 1_000 });
+    expect(backingOff.kind === 'cooldown' && backingOff.reason).toContain('refused at its precheck');
+    expect(
+      decideAutomaticFailover({
+        ...context(regions),
+        lastAutomaticFailoverAtMs: null,
+        refusalBackoffUntilMs: NOW,
+      }).kind,
+    ).toBe('failover');
   });
 
   it('reports when there is no healthy target, and ignores stale verdicts', () => {
@@ -163,5 +182,19 @@ describe('planReconciliation', () => {
       region('west', snapshot('west', 'HEALTHY')),
     ];
     expect(planReconciliation({ ...context(regions), ...base })).toBeNull();
+  });
+});
+
+describe('refusalBackoffUntilMs', () => {
+  const deployedHealth = { ...healthPolicy, probeIntervalSeconds: 30 };
+  const deployedFailover = { ...failoverPolicy, cooldownSeconds: 600 };
+  const backoffSeconds = (refusals: number) => {
+    const until = refusalBackoffUntilMs(refusals, NOW, deployedHealth, deployedFailover);
+    return until === null ? null : (until - NOW) / 1000;
+  };
+
+  it('is four probe intervals after one refusal, doubling, and never longer than the cooldown', () => {
+    expect([0, 1, 2, 3, 4, 50].map(backoffSeconds)).toEqual([null, 120, 240, 480, 600, 600]);
+    expect(refusalBackoffUntilMs(1, null, deployedHealth, deployedFailover)).toBeNull();
   });
 });

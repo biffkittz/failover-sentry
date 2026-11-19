@@ -118,6 +118,14 @@ describe('SimulatedDatabase', () => {
     expect(db.snapshot()).toMatchObject({ role: 'replica', epoch: 2 });
   });
 
+  it('never moves backwards when it catches up with a peer that is behind it', () => {
+    const { db } = setup();
+    db.observePrimary({ regionId: 'west', role: 'primary', epoch: 1, lsn: 800 });
+    db.catchUpWith(0); // the peer came back empty
+    expect(db.snapshot()).toMatchObject({ lsn: 800, appliedLsn: 800 });
+    expect(db.isCaughtUpWith(0)).toBe(true);
+  });
+
   it('resets to an empty replica on a power cycle', () => {
     const { db } = setup();
     db.promote({ failoverId: 'x', epoch: 7, mode: 'restore' }, null);

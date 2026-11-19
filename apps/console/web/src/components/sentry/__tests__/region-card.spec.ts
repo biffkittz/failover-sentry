@@ -24,6 +24,17 @@ describe('RegionCard', () => {
     expect(wrapper.emitted('recover')).toEqual([['west']]);
   });
 
+  it('offers recovery for a fenced primary only while manual intervention is required', () => {
+    const fenced = region('east', { compute: 'stopped' });
+    const hasRecover = (wrapper: ReturnType<typeof mountCard>) =>
+      wrapper.findAll('button').some((candidate) => candidate.text().includes('Recover region'));
+    expect(hasRecover(mountCard({ region: fenced, probes: [] }))).toBe(false);
+    expect(hasRecover(mountCard({ region: fenced, probes: [], manualIntervention: true }))).toBe(true);
+    expect(hasRecover(mountCard({ region: region('east'), probes: [], manualIntervention: true }))).toBe(
+      false,
+    );
+  });
+
   it('renders a sparkline with a text alternative when probes exist', () => {
     const probe = region('west').health?.lastProbe;
     const wrapper = mountCard({

@@ -2,6 +2,9 @@
  * Recovering a region (after the sentry fenced it, say): start its compute again, then wait until its monitor
  * reports it HEALTHY as a replica. Runs in the background, outside normal operations, so a failover starting
  * meanwhile doesn't cancel it.
+ *
+ * Usually the region is a standby. It can also be the primary: a forced failover that fenced the old primary and then
+ * failed leaves the stopped region primary, in manual intervention (validateRecoverRegion allows exactly that case).
  */
 import type { RegionId, RegionRecovery } from '@failover-sentry/contracts';
 import { ApplicationFailure, condition } from '@temporalio/workflow';
@@ -43,12 +46,19 @@ export async function recoverRegion(
     }
     state.regionCompute.set(regionId, 'running');
     recovery.phase = 'DONE';
-    recovery.detail = 'Healthy and replicating as a standby';
+    // A recovered primary (the fenced old primary of a failover that needed manual intervention) comes back empty,
+    // as a replica; reconciliation then promotes it, unless a standby holds newer data.
+    const primary = regionId === state.activeRegionId;
+    recovery.detail = primary
+      ? 'Running again, as a replica until the sentry promotes it'
+      : 'Healthy and replicating as a standby';
     host.raiseAlert(
       'REGION_RECOVERED',
       'info',
       `${name} recovered`,
-      `${name} is back as a healthy standby.`,
+      primary
+        ? `${name} is running again. It came back as an empty replica: the sentry promotes it, unless a standby holds newer data, in which case fail over to that standby.`
+        : `${name} is back as a healthy standby.`,
       {
         regionId,
       },

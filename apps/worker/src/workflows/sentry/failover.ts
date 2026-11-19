@@ -524,13 +524,18 @@ export class FailoverExecution {
   // Compensation
   // ---------------------------------------------------------------------------------------------------------------
 
-  /** Runs in a non-cancellable scope: cleanup must finish even when the failover was cancelled. */
+  /**
+   * Runs in a non-cancellable scope: cleanup must finish even when the failover was cancelled. Returns the outcome:
+   * REFUSED or ABORTED when only the precheck ran, else REVERTED / ABORTED when the old primary took back over,
+   * KEPT_TARGET when it couldn't and the target serves, and MANUAL_INTERVENTION when neither could.
+   */
   async compensate(error: unknown): Promise<FailoverOutcome> {
     const cancelled = isCancellation(error) || this.abortedByOperator;
     this.run.phase = 'COMPENSATING';
     if (!this.started('DRAIN_EDGE')) {
+      // Only the precheck ran: it refused (or the operator aborted it). Nothing moved, so nothing was reverted.
       this.compensation('Nothing to undo', 'SKIPPED', 'The failover stopped before changing anything');
-      return cancelled ? 'ABORTED' : 'REVERTED';
+      return cancelled ? 'ABORTED' : 'REFUSED';
     }
 
     const oldPrimary = await this.host.probeRegion(this.from);

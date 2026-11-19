@@ -33,4 +33,10 @@ export interface SentryCarriedState {
   sequence: number;
   /** When the last failover ended (decisions ignore older health). Absent in state carried by older versions. */
   healthValidSince?: string | null;
+  /**
+   * Automatic failovers refused at their precheck in a row, and when the last one was: they set the back-off before
+   * the next attempt. Absent in state carried by older versions.
+   */
+  automaticRefusals?: number;
+  lastAutomaticRefusalAt?: string | null;
 }

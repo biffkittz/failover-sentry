@@ -94,6 +94,20 @@ describe('ReplicationAgent', () => {
     ]);
   });
 
+  it('keeps its data in a planned promotion away from a region that came back empty', async () => {
+    const { db, peer, sent, step } = setup();
+    await step(500, 4); // caught up with the primary: appliedLsn 200
+    // The primary restarts empty (its in-memory database is gone) and the sentry fails over to the freshest region.
+    peer.status = { regionId: 'west', role: 'replica', epoch: 0, lsn: 0 };
+    db.promote({ failoverId: 'fo-8', epoch: 2, mode: 'planned' }, null);
+    await step(500, 2); // nothing to catch up from, so the switch starts at once
+    await step(1_000, 2);
+    expect(db.snapshot()).toMatchObject({ role: 'primary', epoch: 2, lsn: 200, appliedLsn: 200 });
+    expect(sent).toEqual([
+      expect.objectContaining({ type: 'replication.promotion.completed', dataLossTransactions: 0 }),
+    ]);
+  });
+
   it('runs a forced promotion without the old primary, accounting for lost transactions', async () => {
     const { db, peer, sent, step } = setup();
     await step(500); // appliedLsn 50 of 200

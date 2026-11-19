@@ -113,8 +113,14 @@ export function validateRecoverRegion(state: SentryState, request: RecoverRegion
   if (!region) {
     throw new Error(`Unknown region "${request.regionId}"`);
   }
-  if (request.regionId === state.activeRegionId) {
-    throw new Error(`${request.regionId} is the primary; only a standby can be recovered`);
+  const compute = state.regionCompute.get(request.regionId);
+  // The primary can be recovered only in one case: a forced failover fenced it (stopped its compute) and then failed,
+  // leaving the sentry in manual intervention with the stopped region still primary. Nothing else would restart it.
+  const fencedPrimary = state.mode === 'MANUAL_INTERVENTION_REQUIRED' && compute === 'stopped';
+  if (request.regionId === state.activeRegionId && !fencedPrimary) {
+    throw new Error(
+      `${request.regionId} is the primary; only a standby can be recovered (or a fenced primary while manual intervention is required)`,
+    );
   }
   if (state.currentFailover?.fromRegionId === request.regionId) {
     throw new Error(`${request.regionId} is the source of the failover in progress`);
@@ -123,7 +129,6 @@ export function validateRecoverRegion(state: SentryState, request: RecoverRegion
   if (recovery && (recovery.phase === 'STARTING_COMPUTE' || recovery.phase === 'AWAITING_HEALTH')) {
     throw new Error(`${request.regionId} is already being recovered`);
   }
-  const compute = state.regionCompute.get(request.regionId);
   const status = state.regionHealth.get(request.regionId)?.status;
   if (compute !== 'stopped' && status !== 'UNHEALTHY') {
     throw new Error(`${request.regionId} is neither stopped nor unhealthy; there is nothing to recover`);

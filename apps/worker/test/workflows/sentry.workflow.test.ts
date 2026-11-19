@@ -212,6 +212,54 @@ describe('failoverSentryWorkflow', () => {
     });
   });
 
+  it('lets an operator recover the fenced primary when a forced failover needs manual intervention', async () => {
+    const world = new FakeWorld(['east', 'west']);
+    await withSentry(world, {}, async ({ handle, waitFor, lastFailover }) => {
+      await waitFor('east established', established);
+      await waitFor(
+        'west observed healthy',
+        (state) => state.regions.find((region) => region.config.id === 'west')?.health?.status === 'HEALTHY',
+      );
+      // East goes down and is fenced (compute stopped); then west's promotion fails, and east can't take back over.
+      world.region('west').promotionBehaviour = 'fail';
+      world.region('east').healthy = false;
+      const failed = await waitFor('failover finished', (state) => Boolean(lastFailover(state)?.outcome));
+      expect(lastFailover(failed)?.outcome).toBe('MANUAL_INTERVENTION');
+      expect(failed).toMatchObject({ mode: 'MANUAL_INTERVENTION_REQUIRED', activeRegionId: 'east' });
+      expect(failed.regions.find((region) => region.config.id === 'east')?.compute).toBe('stopped');
+
+      // East is still the primary, so it is the region to restart; before the fix, nothing could.
+      const accepted = await handle.executeUpdate(recoverRegionUpdate, {
+        args: [{ regionId: 'east', requestedBy: 'tester' }],
+      });
+      expect(accepted.regionId).toBe('east');
+      const recovered = await waitFor(
+        'east recovered',
+        (state) => state.regions.find((region) => region.config.id === 'east')?.recovery?.phase === 'DONE',
+      );
+      expect(recovered.regions.find((region) => region.config.id === 'east')?.compute).toBe('running');
+      // East came back empty while west still holds the data: rather than promote an empty database, the sentry asks
+      // an operator to fail over to west (automatic failover is suspended).
+      await waitFor('data on the standby reported', (state) =>
+        state.timeline.some((event) => event.kind === 'DATA_ON_STANDBY'),
+      );
+      expect(world.region('east').db.role).toBe('replica');
+
+      // The operator fixed west and fails over to it: service is back.
+      world.region('west').promotionBehaviour = 'complete';
+      const restore = await handle.executeUpdate(triggerFailoverUpdate, {
+        args: [{ targetRegionId: 'west', mode: 'planned', reason: 'restore service', requestedBy: 'tester' }],
+      });
+      const done = await waitFor(
+        'failover to west finished',
+        (state) => lastFailover(state)?.id === restore.failoverId,
+      );
+      expect(lastFailover(done)?.outcome).toBe('SUCCEEDED');
+      expect(done).toMatchObject({ mode: 'NORMAL', activeRegionId: 'west' });
+      expect(done.edge).toMatchObject({ mode: 'active', activeRegionId: 'west' });
+    });
+  });
+
   it('runs a manual planned failover requested through the Update, then recovers nothing to recover', async () => {
     const world = new FakeWorld(['east', 'west']);
     await withSentry(world, {}, async ({ handle, waitFor, lastFailover }) => {
@@ -273,6 +321,62 @@ describe('failoverSentryWorkflow', () => {
       expect(run?.steps.find((step) => step.name === 'DRAIN_EDGE')?.status).toBe('PENDING');
       expect(world.region('east').db.role).toBe('primary');
       expect(world.edge).toMatchObject({ mode: 'active', activeRegionId: 'east' });
+      // Reported as refused (a warning), not as a critical "reverted" that claims traffic came back.
+      expect(run?.outcome).toBe('REFUSED');
+      const alerts = done.alerts.filter((alert) => alert.failoverId === run?.id);
+      expect(alerts.map((alert) => alert.kind)).not.toContain('FAILOVER_REVERTED');
+      expect(alerts.find((alert) => alert.kind === 'FAILOVER_REFUSED')).toMatchObject({
+        severity: 'warning',
+        message: expect.stringContaining('Nothing was changed: east remains primary.') as string,
+      });
+    });
+  });
+
+  it('backs off after an automatic failover is refused at its precheck, then retries long before the cooldown', async () => {
+    const world = new FakeWorld(['east', 'west']);
+    // One failed probe makes a region UNHEALTHY, and monitors report only on change: after the refusal, the retry
+    // can only come from the sentry's own timer, not from a periodic health report. Back-off: 4 × 2 s = 8 s.
+    const health = {
+      ...healthPolicy,
+      probeIntervalSeconds: 2,
+      failureThreshold: 1,
+      reportEveryProbes: 1_000,
+    };
+    await withSentry(world, { health }, async ({ waitFor }) => {
+      await waitFor('east established', established);
+      await waitFor(
+        'west observed healthy',
+        (state) => state.regions.find((region) => region.config.id === 'west')?.health?.status === 'HEALTHY',
+      );
+      // West looks healthy to its monitor but fails the failover's live check, so the precheck refuses.
+      world.region('west').liveCheckFails = true;
+      world.region('east').healthy = false;
+      const refusedState = await waitFor('automatic failover refused', (state) =>
+        state.recentFailovers.some((run) => run.outcome === 'REFUSED'),
+      );
+      const refused = refusedState.recentFailovers.find((run) => run.outcome === 'REFUSED');
+      expect(refused).toMatchObject({ trigger: 'AUTOMATIC', fromRegionId: 'east', toRegionId: 'west' });
+      expect(world.region('east').computeStopped, 'a refused failover fences nothing').toBe(false);
+      expect(
+        refusedState.alerts.find(
+          (alert) => alert.kind === 'FAILOVER_REFUSED' && alert.failoverId === refused?.id,
+        )?.message,
+      ).toContain('Automatic failover tries again after');
+
+      world.region('west').liveCheckFails = false;
+      const done = await waitFor(
+        'automatic failover retried',
+        (state) => state.recentFailovers[0]?.outcome === 'SUCCEEDED',
+        60_000,
+      );
+      const retried = done.recentFailovers[0];
+      expect(retried).toMatchObject({ trigger: 'AUTOMATIC', toRegionId: 'west' });
+      const gapMs = Date.parse(retried?.startedAt ?? '') - Date.parse(refused?.endedAt ?? '');
+      expect(gapMs, 'the back-off is honoured').toBeGreaterThanOrEqual(8_000);
+      expect(gapMs, 'the 60 s cooldown is not').toBeLessThan(40_000);
+      expect(done.timeline.map((event) => event.message)).toContainEqual(
+        expect.stringContaining('refused at its precheck; trying again after'),
+      );
     });
   });
 
@@ -366,6 +470,11 @@ describe('failoverSentryWorkflow', () => {
           args: [{ mode: 'planned', reason: 'x', requestedBy: 'tester' }],
         }),
         /reason must be/,
+      );
+      // A primary is recovered only when fenced in manual intervention, never in normal operation.
+      await expectRejected(
+        handle.executeUpdate(recoverRegionUpdate, { args: [{ regionId: 'east', requestedBy: 'tester' }] }),
+        /east is the primary/,
       );
     });
   });

@@ -42,7 +42,7 @@ stateDiagram-v2
   NormalOperations --> Failover: automatic decision / triggerFailover Update / reconciler (data on standby)
   NormalOperations --> NormalOperations: reconfigure Update (between cycles)
   NormalOperations --> [*]: continue-as-new (history long)
-  Failover --> NormalOperations: SUCCEEDED / REVERTED / ABORTED / KEPT_TARGET
+  Failover --> NormalOperations: SUCCEEDED / REFUSED / REVERTED / ABORTED / KEPT_TARGET
   Failover --> NormalOperations: MANUAL_INTERVENTION (auto-failover suspended)
 ```
 
@@ -121,6 +121,14 @@ a target that is unhealthy (unless an operator forces) or already primary. A **p
   (`TargetNotReplicating` otherwise). An automatic failover in that situation stays forced instead of trying
   planned. Regions too old to report the field skip this check.
 
+A refused failover ends as **`REFUSED`** with a warning (`FAILOVER_REFUSED`: the precheck's reason, and that nothing
+changed). Since nothing moved, an automatic one doesn't start the cooldown (which exists to stop traffic from
+flapping); it **backs off** instead: four probe intervals, doubling with every further refusal in a row, never longer
+than the cooldown (2, 4, 8, then 10 minutes deployed). Without it, a standby that looks healthy to its monitor but fails
+the live check would be retried about every 90 s, with alerts each time. The refusals reset when the primary reports
+HEALTHY again or a failover gets past its precheck. When a cooldown or back-off ends, a timer re-evaluates at once,
+rather than waiting for the next health report (which a steady region sends only every `reportEveryProbes` probes).
+
 ## Compensation (saga)
 
 `FailoverExecution` derives which side effects it attempted (edge drained, old primary fenced, promotion requested,
@@ -128,12 +136,18 @@ edge switched) from its steps' statuses. `compensate` (non-cancellable) chooses:
 
 | Old primary can serve? | Target promoted? | Action | Outcome |
 | --- | --- | --- | --- |
+| — (only the precheck ran) | no | nothing to undo | `REFUSED` / `ABORTED` |
 | yes | any | drain edge, demote target, restore old primary under a **new** epoch, route back | `REVERTED` / `ABORTED` |
 | no | yes | keep the target, make sure the edge routes to it | `KEPT_TARGET` |
 | no | no | hold the maintenance page, suspend automatic failover, alert | `MANUAL_INTERVENTION` |
 
 Each compensation step is attempted independently and recorded (`run.compensations`), so a failure in one doesn't
 hide the others.
+
+After `MANUAL_INTERVENTION` from a forced failover, the old primary is still the active region and its compute is
+stopped (fenced). `recoverRegion` accepts that one primary (normally only standbys): it restarts the region, which
+comes back as an empty replica, and reconciliation promotes it again, or, when a standby holds newer data, records
+`DATA_ON_STANDBY` for an operator to fail over to that standby.
 
 ## Activities
 
@@ -158,8 +172,8 @@ normal-operations cycles, after waiting for `allHandlersFinished()` and for back
 recoveries). A failover or reconfiguration requested during that wait can't finish before the main loop serves it,
 so the sentry defers continuing as new and serves it first (`CONTINUE_AS_NEW_DEFERRED` in the timeline) instead of
 waiting for it forever. It carries everything that matters: epoch, active region, edge routing, region health and
-compute, when the last failover ended, recent failovers, alerts, timeline, processed webhook event IDs and its ID
-sequence.
+compute, when the last failover ended, refused automatic failovers in a row (the back-off), recent failovers,
+alerts, timeline, processed webhook event IDs and its ID sequence.
 
 ## Determinism and versioning
 
@@ -179,6 +193,7 @@ Patches in use (`sentry/sentry.ts`):
 | `planned-needs-replicating-target` | The precheck refuses a planned failover to a target not in contact with the primary. |
 | `stop-monitors-on-cancel` | When the sentry itself is cancelled, it stops its monitors by workflow ID before ending. |
 | `cancel-monitors-by-workflow-id` | Monitors are cancelled by workflow ID before the normal-operations scope, so one that continued as new still stops. |
+| `refused-failover-backoff` | The cooldown starts only once an automatic failover gets past its precheck; a refused one backs off instead, and a timer re-evaluates when a cooldown or back-off ends. |
 
 ## Testing
 
@@ -186,9 +201,11 @@ Patches in use (`sentry/sentry.ts`):
   reconciliation plans).
 - `apps/worker/test/adapters`: signed HTTP clients against local servers, fencing refusals, Cloudflare challenges,
   the email payload.
-- `apps/worker/test/workflows`: eighteen end-to-end scenarios against the Temporal CLI's dev server with a fake world
-  (`test/helpers/fake-world.ts`): bootstrap, automatic failover with fencing, manual planned failover (and no false
-  split brain after it), a planned failover refused at the precheck when the target can't reach the primary, cancelling the sentry in
+- `apps/worker/test/workflows`: twenty end-to-end scenarios against the Temporal CLI's dev server with a fake world
+  (`test/helpers/fake-world.ts`): bootstrap, automatic failover with fencing, recovering the fenced primary after a
+  failover that needed manual intervention, manual planned failover (and no false split brain after it), a planned
+  failover refused at the precheck when the target can't reach the primary (reported as refused), an automatic
+  failover refused by a flaky target that backs off and retries on its own timer, cancelling the sentry in
   the middle of a failover (it compensates, then ends), a second failover refused while the first takes over, validator rejections, stall → abort,
   stall → retry as forced, missing webhook, in-flight abort, stabilization anomaly → revert, duplicate/stale
   webhooks, split-brain fencing, suspended automatic failover. Two more run on a server that suggests continuing as
